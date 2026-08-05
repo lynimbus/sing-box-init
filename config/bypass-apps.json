@@ -1,0 +1,14 @@
+{
+  "route": {
+    "rules": [
+      {
+        "package_name": [
+          "com.tencent.mm",
+          "com.tencent.mobileqq"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      }
+    ]
+  }
+}

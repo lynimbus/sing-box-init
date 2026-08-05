@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sing-box Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 24px;
+    text-align: center;
+  }
+  p { font-size: 14px; color: #94a3b8; }
+  .btn {
+    display: inline-block;
+    min-width: 200px;
+    padding: 12px 24px;
+    border-radius: 12px;
+    font-size: 15px;
+    text-decoration: none;
+    background: #38bdf8;
+    color: #0f172a;
+    font-weight: 600;
+  }
+  #tip { font-size: 12px; color: #94a3b8; word-break: break-all; }
+</style>
+</head>
+<body>
+  <p>正在打开外部浏览器...</p>
+  <a id="open" class="btn" href="#">打开 Dashboard</a>
+  <p id="tip"></p>
+
+<script type="module">
+  const DEFAULT_URL = 'http://127.0.0.1:1235/dashboard/';
+  const CONFIG = '/data/adb/sing-box/conf.d/config.json';
+
+  let execFn = null;
+  try {
+    const ksu = await import('kernelsu');
+    execFn = ksu.exec;
+  } catch (e) { /* 当前 Manager 未提供 kernelsu JS API (如 ResukiSU), 只能在页面内打开 */ }
+
+  const $ = (id) => document.getElementById(id);
+
+  function resolveDashboardUrl(configText) {
+    if (!configText) return DEFAULT_URL;
+    let cfg;
+    try { cfg = JSON.parse(configText); } catch (e) { return DEFAULT_URL; }
+    const api = (cfg.services || []).find((s) => s.type === 'api');
+    if (!api || !api.listen_port) return DEFAULT_URL;
+    let host = api.listen;
+    if (!host || host === '0.0.0.0' || host === '::' || host === '::0') host = '127.0.0.1';
+    const path = (api.dashboard && api.dashboard.path) || '';
+    return 'http://' + host + ':' + api.listen_port + '/' + path + '/';
+  }
+
+  function openExternal(url) {
+    if (execFn) {
+      // am start 打开外部浏览器, 随后模拟返回键关掉本页, 只剩浏览器里的 dashboard
+      execFn('am start -a android.intent.action.VIEW -d "' + url + '"');
+      $('tip').textContent = '已在外部浏览器打开';
+      try { execFn('input keyevent 4'); } catch (e) {}
+    } else {
+      location.href = url;
+    }
+  }
+
+  $('open').addEventListener('click', (e) => {
+    e.preventDefault();
+    openExternal($('open').href);
+  });
+
+  let configText = '';
+  if (execFn) {
+    configText = (execFn('cat ' + CONFIG + ' 2>/dev/null') || {}).stdout || '';
+    // 旧布局兜底: conf.d/ 不存在时读旧位置
+    if (!configText) configText = (execFn('cat /data/adb/sing-box/config.json 2>/dev/null') || {}).stdout || '';
+  }
+  const url = resolveDashboardUrl(configText);
+  $('open').href = url;
+  openExternal(url);
+</script>
+</body>
+</html>

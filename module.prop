@@ -1,0 +1,7 @@
+id=sing-box-init
+name=sing-box init
+version=1.14.0-beta.7
+versionCode=11407
+author=lynimbus
+description=让 sing-box 内核像 systemd 服务一样持久运行
+webuiIcon=webroot/icon.png
