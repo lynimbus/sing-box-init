@@ -8,9 +8,9 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 - `bin/` — 随模块附带的 sing-box arm64 tar.gz。**被 .gitignore 忽略但打包必须包含**：customize.sh 安装时解压出 `bin/sing-box` 可执行文件（约 94MB）。删除/改名会破坏安装。
 - `config/config.json` — 随模块发布的默认配置，customize.sh 仅在设备上 `/data/adb/sing-box/conf.d/config.json` 不存在时复制一份（若旧位置 `/data/adb/sing-box/config.json` 存在则先迁移），之后不覆盖用户改动。
 - `config/bypass-apps.json` — **独立排除文件（按包名直连）**：丢进 `conf.d/` 目录，daemon.sh 用 `-C`（目录模式）合并 conf.d/ 下所有 json（**不能定义 inbound/outbound 数组，会 duplicate tag 冲突**）。默认排除微信 `com.tencent.mm`、QQ `com.tencent.mobileqq`（设备配置路由无国内直连规则，final=select 全走日本节点 → QQ 延迟/微信红包语音转文字失败，真机确认过）。customize.sh 仅不存在时复制。
-- `daemon.sh` — **核心引擎**（内部脚本，不面向用户）：`start|stop|restart|status|update_desc|watchdog_loop` 子命令 + 看门狗循环 + 把状态写进模块描述。配置用 `-C` 目录模式（`conf.d/`），回退到 `-c` 单文件模式。
+- `daemon.sh` — **核心引擎**（内部脚本，不面向用户）：`start|stop|restart|toggle|status|update_desc|watchdog_loop` 子命令 + 看门狗循环 + 把状态写进模块描述。配置用 `-C` 目录模式（`conf.d/`），回退到 `-c` 单文件模式。
 - `service.sh` — 开机启动钩子，**无参数**（用户要求删掉命令参数）：只调用 `daemon.sh start`。
-- `action.sh` — 唯一用户入口：KernelSU Manager 的 Action 按钮 = 开关切换（未运行→启动，运行中/重启中→停止）。
+- `action.sh` — 唯一用户入口：KernelSU Manager 的 Action 按钮 = 开关切换（未运行→启动，运行中/重启中→停止），只调 `daemon.sh toggle` 一个子命令。
 - `customize.sh` — 安装脚本，**被安装器 source 而不是执行**：只能用注入的函数（`ui_print`/`abort`/`set_perm`）和变量（`MODPATH`/`ARCH` 等），不能依赖 cwd。
 - `webroot/` — KernelSU WebUI 入口（`index.html` + `icon.png`），webuiIcon 在 module.prop 里声明。index.html 不做状态/开关（那些在描述和 Action 按钮上），**加载即用 `am start` 跳外部浏览器打开 dashboard，并模拟返回键关掉本页**（无 kernelsu API 时降级为页面内打开）。
 

@@ -4,10 +4,10 @@
 # 手动开关: KernelSU Manager 模块页的 Action 按钮 (action.sh)
 # 注意: 一律用 sh 调用 daemon.sh, 不依赖可执行位 (安装后脚本可能没有 +x)
 
-MODDIR=${0%/*}
+MODDIR=$(cd "${0%/*}" && pwd)
 [ -f "$MODDIR/module.prop" ] || MODDIR=/data/adb/modules/sing-box-init
 
+# start 内部已负责 update_desc, 无需再单独调用
 sh "$MODDIR/daemon.sh" start
-sh "$MODDIR/daemon.sh" update_desc
 
 exit 0

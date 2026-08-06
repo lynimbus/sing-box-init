@@ -13,7 +13,7 @@ fi
 
 # 从 bin/ 中的 tar.gz 解压出 sing-box 可执行文件到模块的 bin/ 目录
 ARCHIVE=$(ls "$MODPATH"/bin/sing-box-*.tar.gz 2>/dev/null | head -n 1)
-if [ -z "$ARCHIVE" ] || [ ! -f "$ARCHIVE" ]; then
+if [ -z "$ARCHIVE" ]; then
     abort "sing-box-init: 未在模块 bin/ 目录找到 sing-box 安装包"
 fi
 ui_print "[sing-box-init] 解压 $(basename "$ARCHIVE") ..."
