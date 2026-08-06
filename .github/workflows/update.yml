@@ -14,9 +14,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 检查最新 sing-box testing 版本
+      - name: 检查 sing-box 核心与项目更新
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # ---- sing-box 核心版本 ----
           RELEASES=$(curl -sL https://api.github.com/repos/reF1nd/sing-box-releases/releases)
           RELEASE_JSON=$(echo "$RELEASES" | jq '[.[] | select(.prerelease==true)][0]')
           TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
@@ -29,8 +32,36 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
 
-          if [ "$CURRENT" = "$VERSION" ]; then
-            echo "已是最新版本, 跳过"
+          CORE_UPDATED=false
+          [ "$CURRENT" != "$VERSION" ] && CORE_UPDATED=true
+          echo "core_updated=$CORE_UPDATED" >> "$GITHUB_OUTPUT"
+
+          # ---- 项目文件是否有更新（自上次 release 以来） ----
+          # 排除工作流自身维护的文件和无关文件，防止工作流自己的提交再次触发构建:
+          # .github/  module.prop  update.json  README  LICENSE  .gitignore
+          PROJECT_UPDATED=false
+          LAST_TAG=$(gh release view --json tagName --jq '.tagName' 2>/dev/null || true)
+          if [ -n "$LAST_TAG" ]; then
+            HEAD_SHA=$(git rev-parse HEAD)
+            if CHANGED=$(gh api "repos/$GITHUB_REPOSITORY/compare/$LAST_TAG...$HEAD_SHA" --jq '.files[].filename' 2>/dev/null); then
+              CHANGED=$(echo "$CHANGED" | grep -vE '^(\.github/|module\.prop|update\.json|README|LICENSE|\.gitignore)' || true)
+              if [ -n "$CHANGED" ]; then
+                PROJECT_UPDATED=true
+                echo "项目文件变更:"
+                echo "$CHANGED"
+              fi
+            else
+              # compare API 失败（如 tag 被强制推送重写）: 保守起见视为有更新
+              PROJECT_UPDATED=true
+            fi
+          else
+            # 还没有任何 release, 需要构建
+            PROJECT_UPDATED=true
+          fi
+          echo "project_updated=$PROJECT_UPDATED" >> "$GITHUB_OUTPUT"
+
+          if [ "$CORE_UPDATED" != "true" ] && [ "$PROJECT_UPDATED" != "true" ]; then
+            echo "sing-box 核心无新版且项目无变更, 跳过"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -41,13 +72,14 @@ jobs:
           echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
           echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: 下载新核心
+      - name: 下载 sing-box 核心 (arm64)
+        # bin/ 被 .gitignore 忽略, checkout 里没有, 每次构建都必须重新下载
         if: steps.check.outputs.skip != 'true'
         run: |
           mkdir -p bin
           # 删除旧 tar.gz
           rm -f bin/sing-box-*.tar.gz
-          # 下载新版本
+          # 下载核心
           curl -sL -o "bin/${{ steps.check.outputs.asset_name }}" "${{ steps.check.outputs.asset_url }}"
           echo "已下载: ${{ steps.check.outputs.asset_name }}"
 
@@ -59,7 +91,16 @@ jobs:
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f2)
           LAST_NUM=$(echo "$VERSION" | grep -oE '[0-9]+$')
-          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + LAST_NUM))
+          COMPUTED=$((MAJOR * 10000 + MINOR * 100 + LAST_NUM))
+          PREV=$(grep '^versionCode=' module.prop | sed 's/^versionCode=//')
+          PREV=${PREV:-0}
+          # 保证单调递增: 取 核心计算值 与 上一次 versionCode + 1 的较大者,
+          # 纯项目更新时 versionCode 只 +1, 核心版本回退(如 beta 转 stable)也不倒退
+          if [ "$COMPUTED" -le "$PREV" ]; then
+            VERSION_CODE=$((PREV + 1))
+          else
+            VERSION_CODE=$COMPUTED
+          fi
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
 
       - name: 更新 module.prop
@@ -75,8 +116,15 @@ jobs:
           VERSION="${{ steps.check.outputs.version }}"
           VCODE="${{ steps.versioncode.outputs.version_code }}"
           TAG="${{ steps.check.outputs.tag }}"
-          printf '{\n  "version": "v%s",\n  "versionCode": %s,\n  "zipUrl": "https://github.com/%s/releases/download/v%s/sing-box-init-v%s.zip",\n  "changelog": "https://github.com/reF1nd/sing-box-releases/releases/tag/%s"\n}\n' \
-            "$VERSION" "$VCODE" "$REPO" "$VERSION" "$VERSION" "$TAG" > update.json
+          if [ "${{ steps.check.outputs.core_updated }}" = "true" ]; then
+            # 核心更新: tag 用 v{version}
+            REL_TAG="v${VERSION}"
+          else
+            # 纯项目更新: tag 用 v{version}-r{versionCode}, 避免与已有 v{version} 冲突
+            REL_TAG="v${VERSION}-r${VCODE}"
+          fi
+          printf '{\n  "version": "v%s",\n  "versionCode": %s,\n  "zipUrl": "https://github.com/%s/releases/download/%s/sing-box-init-v%s.zip",\n  "changelog": "https://github.com/reF1nd/sing-box-releases/releases/tag/%s"\n}\n' \
+            "$VERSION" "$VCODE" "$REPO" "$REL_TAG" "$VERSION" "$TAG" > update.json
 
       - name: 构建模块 zip
         if: steps.check.outputs.skip != 'true'
@@ -89,11 +137,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ steps.check.outputs.version }}"
+          VCODE="${{ steps.versioncode.outputs.version_code }}"
           SING_BOX_TAG="${{ steps.check.outputs.tag }}"
           ZIP="sing-box-init-v${VERSION}.zip"
-          gh release create "v${VERSION}" "$ZIP" \
-            --title "v${VERSION}" \
-            --notes "sing-box 核心更新至 ${SING_BOX_TAG}" \
+          if [ "${{ steps.check.outputs.core_updated }}" = "true" ]; then
+            REL_TAG="v${VERSION}"
+            TITLE="v${VERSION}"
+            NOTES="sing-box 核心更新至 ${SING_BOX_TAG}"
+          else
+            REL_TAG="v${VERSION}-r${VCODE}"
+            TITLE="v${VERSION} (build ${VCODE})"
+            NOTES="模块脚本/配置更新（sing-box 核心未变, ${SING_BOX_TAG}）"
+          fi
+          gh release create "$REL_TAG" "$ZIP" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
             --target "${{ github.sha }}"
 
       - name: 提交版本更新
@@ -102,5 +160,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add module.prop update.json
-          git commit -m "chore: 更新 sing-box 核心至 ${{ steps.check.outputs.version }}"
+          if [ "${{ steps.check.outputs.core_updated }}" = "true" ]; then
+            git commit -m "chore: 更新 sing-box 核心至 ${{ steps.check.outputs.version }}" || true
+          else
+            git commit -m "chore: 模块更新（核心未变, build ${{ steps.versioncode.outputs.version_code }}）" || true
+          fi
           git push

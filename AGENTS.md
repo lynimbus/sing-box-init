@@ -26,7 +26,7 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 7. 停止机制：写 `.stop` 标记，看门狗在循环顶部和 `wait` 之后检查。只 kill 死进程的 pid 无法真正停止（看门狗 3 秒后会重新拉起）。
 8. **状态显示在模块描述**：`update_desc` **双写**——`ksud module config set override.description`（需 `KSU_MODULE` 环境变量，脚本里已 export 兜底）+ `sed -i` 改写 module.prop 的 description 行（ResukiSU 等 Manager 可能直接读 module.prop）。**时机竞态（真机踩过）**：必须等看门狗真正拉起 sing-box 后再写（`start` 里轮询最多 5 秒），action.sh 不要自己调 update_desc，由 daemon.sh 的 start/stop 内部负责。
 9. **不要改 module.prop 的 `id`（sing-box-init）**：webroot/index.html 硬编码 `/data/adb/modules/sing-box-init/daemon.sh`，各脚本也有同名兜底路径。
-10. 改版本时 `version` 和 `versionCode`（整数）要同步；`version` 会被 build.sh 拼进 zip 文件名。
+10. 改版本时 `version` 和 `versionCode`（整数）要同步；`version` 会被 build.sh 拼进 zip 文件名。（例外：工作流的纯项目更新只动 `versionCode`，`version` 跟随核心版本不变。）
 11. 用户可见输出和注释用中文（现有风格）。
 
 ## 本机验证（不要真的跑设备逻辑）
@@ -55,8 +55,9 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 ## 核心更新（GitHub Actions 自动构建发布）
 
 - `update.json` — KernelSU Manager 模块更新元数据，`module.prop` 的 `updateJson` 字段指向此文件在 GitHub 上的 raw URL。
-- `.github/workflows/update.yml` — GitHub Actions 工作流：每 6 小时 + 手动触发，自动检测 `reF1nd/sing-box-releases` 最新 testing（prerelease）版本，下载 arm64 tar.gz → 更新 `module.prop` + `update.json` → `build.sh` 打包 → `gh release create` 发布 → git commit + push。
+- `.github/workflows/update.yml` — GitHub Actions 工作流：每 6 小时 + 手动触发，自动检测 `reF1nd/sing-box-releases` 最新 testing（prerelease）版本，下载 arm64 tar.gz → 更新 `module.prop` + `update.json` → `build.sh` 打包 → `gh release create` 发布 → git commit + push。**构建触发条件有两个，满足任一即构建**：① sing-box 核心有新版本；② 项目文件有更新（用 GitHub compare API 对比上次 release 到 HEAD，排除 `.github/`、`module.prop`、`update.json`、README/LICENSE/.gitignore——这些都是工作流自己维护或无关的，防止工作流自己的提交再次触发构建）。
 - **首次推送前**：把 `module.prop` 和 `update.json` 里的 `YOUR_GITHUB_USERNAME` 替换为实际 GitHub 用户名。
 - **触发方式**：定时（每 6 小时）+ 手动 `workflow_dispatch`（在 GitHub Actions 页面点 Run workflow）。
 - **设备端**：KernelSU Manager 检测到 `update.json` 版本变化 → 显示更新按钮 → 用户点击 → 下载 zip 并安装（等同于刷入新模块）。
-- `versionCode` 规则：`major * 10000 + minor * 100 + 最后数字`（如 `1.14.0-beta.8` → `11408`）。
+- `versionCode` 规则：`max(major * 10000 + minor * 100 + 最后数字, 上一次 versionCode + 1)`，保证单调递增（防止 beta 转 stable 等版本回退、以及纯项目更新时 versionCode 倒退导致 Manager 不提示更新）。
+- **纯项目更新（核心未变）**：`version` 保持核心版本不变，只 `versionCode + 1`；release tag 用 `v{version}-r{versionCode}`（如 `v1.14.0-beta.8-r11409`，避免与核心更新的 `v{version}` tag 冲突），zip 文件名不变（`build.sh` 用 `version` 拼名）。
