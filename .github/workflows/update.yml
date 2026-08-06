@@ -1,0 +1,106 @@
+name: Update sing-box Core
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查最新 sing-box testing 版本
+        id: check
+        run: |
+          RELEASES=$(curl -sL https://api.github.com/repos/reF1nd/sing-box-releases/releases)
+          RELEASE_JSON=$(echo "$RELEASES" | jq '[.[] | select(.prerelease==true)][0]')
+          TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          VERSION=$(echo "$TAG" | sed 's/^v//; s/-reF1nd$//')
+          CURRENT=$(grep '^version=' module.prop | sed 's/^version=//')
+
+          echo "当前版本: $CURRENT"
+          echo "最新版本: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "已是最新版本, 跳过"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("sing-box-.*-android-arm64\\.tar\\.gz$")) | .browser_download_url')
+          ASSET_NAME=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("sing-box-.*-android-arm64\\.tar\\.gz$")) | .name')
+          echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: 下载新核心
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          mkdir -p bin
+          # 删除旧 tar.gz
+          rm -f bin/sing-box-*.tar.gz
+          # 下载新版本
+          curl -sL -o "bin/${{ steps.check.outputs.asset_name }}" "${{ steps.check.outputs.asset_url }}"
+          echo "已下载: ${{ steps.check.outputs.asset_name }}"
+
+      - name: 计算 versionCode
+        if: steps.check.outputs.skip != 'true'
+        id: versioncode
+        run: |
+          VERSION="${{ steps.check.outputs.version }}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          LAST_NUM=$(echo "$VERSION" | grep -oE '[0-9]+$')
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + LAST_NUM))
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: 更新 module.prop
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          sed -i "s/^version=.*/version=${{ steps.check.outputs.version }}/" module.prop
+          sed -i "s/^versionCode=.*/versionCode=${{ steps.versioncode.outputs.version_code }}/" module.prop
+
+      - name: 更新 update.json
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          REPO="${{ github.repository }}"
+          VERSION="${{ steps.check.outputs.version }}"
+          VCODE="${{ steps.versioncode.outputs.version_code }}"
+          TAG="${{ steps.check.outputs.tag }}"
+          printf '{\n  "version": "v%s",\n  "versionCode": %s,\n  "zipUrl": "https://github.com/%s/releases/download/v%s/sing-box-init-v%s.zip",\n  "changelog": "https://github.com/reF1nd/sing-box-releases/releases/tag/%s"\n}\n' \
+            "$VERSION" "$VCODE" "$REPO" "$VERSION" "$VERSION" "$TAG" > update.json
+
+      - name: 构建模块 zip
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          sh build.sh
+
+      - name: 创建 GitHub Release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.check.outputs.version }}"
+          SING_BOX_TAG="${{ steps.check.outputs.tag }}"
+          ZIP="sing-box-init-v${VERSION}.zip"
+          gh release create "v${VERSION}" "$ZIP" \
+            --title "v${VERSION}" \
+            --notes "sing-box 核心更新至 ${SING_BOX_TAG}" \
+            --target "${{ github.sha }}"
+
+      - name: 提交版本更新
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add module.prop update.json
+          git commit -m "chore: 更新 sing-box 核心至 ${{ steps.check.outputs.version }}"
+          git push
