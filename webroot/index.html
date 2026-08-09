@@ -20,6 +20,8 @@
     padding: 24px;
     text-align: center;
   }
+  /* 默认隐藏入口界面, 避免跳转外部浏览器前闪过 */
+  #ui { display: none; }
   p { font-size: 14px; color: #94a3b8; }
   .btn {
     display: inline-block;
@@ -36,9 +38,10 @@
 </style>
 </head>
 <body>
-  <p>正在打开外部浏览器...</p>
-  <a id="open" class="btn" href="#">打开 Dashboard</a>
-  <p id="tip"></p>
+  <div id="ui">
+    <a id="open" class="btn" href="#">打开 Dashboard</a>
+    <p id="tip"></p>
+  </div>
 
 <script type="module">
   const DEFAULT_URL = 'http://127.0.0.1:1235/dashboard/';
@@ -64,15 +67,28 @@
     return 'http://' + host + ':' + api.listen_port + '/' + path + '/';
   }
 
+  // 兜底界面: 仅当自动跳转失败仍停留本页时显示
+  function showFallback(url) {
+    $('open').href = url;
+    $('ui').style.display = 'block';
+    $('tip').textContent = '自动跳转失败, 请手动点击打开';
+  }
+
   function openExternal(url) {
+    let started = false;
     if (execFn) {
-      // am start 打开外部浏览器, 随后模拟返回键关掉本页, 只剩浏览器里的 dashboard
-      execFn('am start -a android.intent.action.VIEW -d "' + url + '"');
-      $('tip').textContent = '已在外部浏览器打开';
-      try { execFn('input keyevent 4'); } catch (e) {}
-    } else {
-      location.href = url;
+      try {
+        // am start 打开外部浏览器, 随后模拟返回键关掉本页, 只剩浏览器里的 dashboard
+        execFn('am start -a android.intent.action.VIEW -d "' + url + '"');
+        try { execFn('input keyevent 4'); } catch (e) {}
+        started = true;
+      } catch (e) { /* am start 失败, 降级为页面内打开 */ }
     }
+    if (!started) {
+      try { location.href = url; } catch (e) {}
+    }
+    // 若 800ms 后仍停留本页 (浏览器未打开/页面未关闭), 显示兜底入口
+    setTimeout(() => showFallback(url), 800);
   }
 
   $('open').addEventListener('click', (e) => {
