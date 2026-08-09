@@ -3,18 +3,19 @@
     "level": "info",
     "timestamp": true
   },
-  "inbounds": [
-    {
-      "type": "mixed",
-      "tag": "mixed-in",
-      "listen": "127.0.0.1",
-      "listen_port": 2080
-    }
-  ],
   "outbounds": [
     {
       "type": "direct",
       "tag": "direct"
     }
-  ]
+  ],
+  "route": {
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "geoip-cn-nodoh",
+        "url": "https://raw.githubusercontent.com/lynimbus/geoip-cn-nodoh/main/geoip-cn-nodoh.srs"
+      }
+    ]
+  }
 }

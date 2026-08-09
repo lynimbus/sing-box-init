@@ -6,8 +6,8 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 
 - **仓库根目录就是模块根目录**：build.sh 把根目录文件直接打 zip，KernelSU Manager 刷入。
 - `bin/` — 随模块附带的 sing-box arm64 tar.gz。**被 .gitignore 忽略但打包必须包含**：customize.sh 安装时解压出 `bin/sing-box` 可执行文件（约 94MB）。删除/改名会破坏安装。
-- `config/config.json` — 随模块发布的默认配置，customize.sh 仅在设备上 `/data/adb/sing-box/conf.d/config.json` 不存在时复制一份（若旧位置 `/data/adb/sing-box/config.json` 存在则先迁移），之后不覆盖用户改动。
-- `config/bypass-apps.json` — **独立排除文件（按包名直连）**：丢进 `conf.d/` 目录，daemon.sh 用 `-C`（目录模式）合并 conf.d/ 下所有 json（**不能定义 inbound/outbound 数组，会 duplicate tag 冲突**）。默认排除微信 `com.tencent.mm`、QQ `com.tencent.mobileqq`（设备配置路由无国内直连规则，final=select 全走日本节点 → QQ 延迟/微信红包语音转文字失败，真机确认过）。customize.sh 仅不存在时复制。
+- `config/config.json` — 随模块发布的默认核心配置，customize.sh 仅在设备上 `/data/adb/sing-box/conf.d/config.json` 不存在时复制一份（若旧位置 `/data/adb/sing-box/config.json` 存在则先迁移），之后不覆盖用户改动。**不定义 inbounds**（唯一的 ebpf 入站在 bypass-apps.json 里，避免目录合并时 duplicate tag）；带 `route.rule_set: geoip-cn-nodoh` 供 bypass-apps.json 的 `bypass_rule_set` 引用。
+- `config/bypass-apps.json` — **ebpf 白名单入站文件**：定义唯一的 `ebpf` 入站（`include_package` = 走代理的应用白名单，未匹配的应用在内核层直接绕过）。丢进 `conf.d/` 目录，daemon.sh 用 `-C`（目录模式）合并 conf.d/ 下所有 json。**合并语义（源码 `badjson.MergeJSON` 确认）：数组追加、对象递归合并**——所以 ebpf 入站只能在一个文件里定义一次，conf.d 下其他文件不要再写 inbound/outbound 数组（会 duplicate tag 冲突）。默认白名单只含谷歌三件套（`com.google.android.gms`/`com.google.android.gsf`/`com.android.vending`），加应用直接编辑此文件 `include_package`。⚠️ 包名只在启动时解析，装/删/重装应用后需重启 sing-box（Action 按钮就是重启）；共享同一 UID 的应用无法被 eBPF 区分。customize.sh 仅不存在时复制。
 - `daemon.sh` — **核心引擎**（内部脚本，不面向用户）：`start|stop|restart|status|update_desc|watchdog_loop` 子命令 + 常驻看门狗循环（模块开关决定 sing-box 启停，见约束 12）+ 把状态写进模块描述。配置用 `-C` 目录模式（`conf.d/`），回退到 `-c` 单文件模式。
 - `service.sh` — 开机启动钩子，**无参数**（用户要求删掉命令参数）：只调用 `daemon.sh start`。
 - `action.sh` — 唯一用户入口：KernelSU Manager 的 Action 按钮 = **只重启**（`stop` + `start`），只调 `daemon.sh restart` 一个子命令。开关 sing-box 用模块本身的启用/禁用开关。

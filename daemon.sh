@@ -10,7 +10,7 @@ MODDIR=$(cd "${0%/*}" && pwd)
 BIN="$MODDIR/bin/sing-box"
 DATA_DIR=${SING_BOX_DATA_DIR:-/data/adb/sing-box}
 CONFIG="$DATA_DIR/config.json"
-# 配置目录模式 (-C): 合并 conf.d/ 下所有 json, 排除规则等独立文件丢进 conf.d/ 即可, 不用改脚本
+# 配置目录模式 (-C): 合并 conf.d/ 下所有 json (数组追加, 勿重复定义同 tag 的 inbound/outbound), 独立配置丢进 conf.d/ 即可, 不用改脚本
 CONF_DIR="$DATA_DIR/conf.d"
 LOG_DIR="$DATA_DIR/logs"
 PIDFILE="$DATA_DIR/sing-box.pid"

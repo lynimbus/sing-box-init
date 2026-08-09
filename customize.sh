@@ -35,7 +35,8 @@ ui_print "[sing-box-init] sing-box 已安装到 $MODPATH/bin/sing-box"
 chmod 0755 "$MODPATH"/*.sh 2>/dev/null
 
 # 初始化配置目录 (配置持久化在 /data/adb/sing-box, 不受模块更新/卸载影响)
-# 布局: conf.d/ 为 sing-box 配置目录 (-C 模式), 目录内 json 全部合并, 独立排除文件丢这里即可
+# 布局: conf.d/ 为 sing-box 配置目录 (-C 模式), 目录内 json 全部合并 (数组追加, 勿重复定义同 tag 的 inbound/outbound)
+#       ebpf 白名单入站放在独立的 bypass-apps.json, 加应用只改它的 include_package
 DATA_DIR=/data/adb/sing-box
 mkdir -p "$DATA_DIR" "$DATA_DIR/logs" "$DATA_DIR/conf.d"
 if [ ! -f "$DATA_DIR/conf.d/config.json" ]; then
@@ -50,10 +51,11 @@ else
     ui_print "[sing-box-init] 检测到已有配置, 保留: $DATA_DIR/conf.d/config.json"
 fi
 
-# 独立排除文件 (按包名直连, 如 QQ/微信), 仅不存在时复制, 不覆盖用户改动
+# ebpf 白名单入站文件 (唯一的 ebpf 入站 + include_package 白名单), 仅不存在时复制, 不覆盖用户改动
+# 白名单 = 走代理的应用, 其余应用在内核层直接绕过; 包名启动时解析, 装/删/重装应用后需重启生效
 if [ ! -f "$DATA_DIR/conf.d/bypass-apps.json" ]; then
     cp -f "$MODPATH/config/bypass-apps.json" "$DATA_DIR/conf.d/bypass-apps.json"
-    ui_print "[sing-box-init] 已生成排除文件: $DATA_DIR/conf.d/bypass-apps.json"
+    ui_print "[sing-box-init] 已生成应用白名单配置: $DATA_DIR/conf.d/bypass-apps.json"
 fi
 
 ui_print "[sing-box-init] 安装完成, 重启后自动生效"
