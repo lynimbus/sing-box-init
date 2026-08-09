@@ -55,7 +55,7 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 ## 核心更新（GitHub Actions 自动构建发布）
 
 - `update.json` — KernelSU Manager 模块更新元数据，`module.prop` 的 `updateJson` 字段指向此文件在 GitHub 上的 raw URL。
-- `.github/workflows/update.yml` — GitHub Actions 工作流：每 6 小时 + 手动触发，自动检测 `reF1nd/sing-box-releases` 最新 testing（prerelease）版本，下载 arm64 tar.gz → 更新 `module.prop` + `update.json` → `build.sh` 打包 → `gh release create` 发布 → git commit + push。**构建触发条件有两个，满足任一即构建**：① sing-box 核心有新版本；② 项目文件有更新（用 GitHub compare API 对比上次 release 到 HEAD，排除 `.github/`、`module.prop`、`update.json`、README/LICENSE/.gitignore——这些都是工作流自己维护或无关的，防止工作流自己的提交再次触发构建）。
+- `.github/workflows/update.yml` — GitHub Actions 工作流：每 6 小时 + 手动触发，自动检测 `reF1nd/sing-box-releases` 最新 testing（prerelease）版本，下载 arm64 tar.gz → 更新 `module.prop` + `update.json` → `build.sh` 打包 → `gh release create` 发布 → git commit + push。**构建触发条件有两个，满足任一即构建**：① sing-box 核心有新版本；② 项目文件有更新（用 GitHub compare API 对比上次 release 到 HEAD，排除 `.github/`、`module.prop`、`update.json`、`changelog.md`、README/LICENSE/.gitignore——这些都是工作流自己维护或无关的，防止工作流自己的提交再次触发构建）。
 - **首次推送前**：把 `module.prop` 和 `update.json` 里的 `YOUR_GITHUB_USERNAME` 替换为实际 GitHub 用户名。
 - **触发方式**：定时（每 6 小时）+ 手动 `workflow_dispatch`（在 GitHub Actions 页面点 Run workflow）。
 - **设备端**：KernelSU Manager 检测到 `update.json` 版本变化 → 显示更新按钮 → 用户点击 → 下载 zip 并安装（等同于刷入新模块）。

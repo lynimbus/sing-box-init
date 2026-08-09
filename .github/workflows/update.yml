@@ -38,13 +38,13 @@ jobs:
 
           # ---- 项目文件是否有更新（自上次 release 以来） ----
           # 排除工作流自身维护的文件和无关文件，防止工作流自己的提交再次触发构建:
-          # .github/  module.prop  update.json  README  LICENSE  .gitignore
+          # .github/  module.prop  update.json  changelog.md  README  LICENSE  .gitignore
           PROJECT_UPDATED=false
           LAST_TAG=$(gh release view --json tagName --jq '.tagName' 2>/dev/null || true)
           if [ -n "$LAST_TAG" ]; then
             HEAD_SHA=$(git rev-parse HEAD)
             if CHANGED=$(gh api "repos/$GITHUB_REPOSITORY/compare/$LAST_TAG...$HEAD_SHA" --jq '.files[].filename' 2>/dev/null); then
-              CHANGED=$(echo "$CHANGED" | grep -vE '^(\.github/|module\.prop|update\.json|README|LICENSE|\.gitignore)' || true)
+              CHANGED=$(echo "$CHANGED" | grep -vE '^(\.github/|module\.prop|update\.json|changelog\.md|README|LICENSE|\.gitignore)' || true)
               if [ -n "$CHANGED" ]; then
                 PROJECT_UPDATED=true
                 echo "项目文件变更:"
@@ -123,8 +123,17 @@ jobs:
             # 纯项目更新: tag 用 v{version}-r{versionCode}, 避免与已有 v{version} 冲突
             REL_TAG="v${VERSION}-r${VCODE}"
           fi
-          printf '{\n  "version": "v%s",\n  "versionCode": %s,\n  "zipUrl": "https://github.com/%s/releases/download/%s/sing-box-init-v%s.zip",\n  "changelog": "https://github.com/reF1nd/sing-box-releases/releases/tag/%s"\n}\n' \
-            "$VERSION" "$VCODE" "$REPO" "$REL_TAG" "$VERSION" "$TAG" > update.json
+          # 生成可读的 changelog.md, 供 Manager 更新弹窗显示。
+          # 不能直接指 GitHub release 页面 (HTML), 否则弹窗里会显示成一堆代码。
+          {
+            echo "## sing-box 核心更新至 ${VERSION}"
+            echo ""
+            curl -sL "https://api.github.com/repos/reF1nd/sing-box-releases/releases/tags/${TAG}" | jq -r '.body'
+            echo ""
+            echo "> 发布页: https://github.com/reF1nd/sing-box-releases/releases/tag/${TAG}"
+          } > changelog.md
+          printf '{\n  "version": "v%s",\n  "versionCode": %s,\n  "zipUrl": "https://github.com/%s/releases/download/%s/sing-box-init-v%s.zip",\n  "changelog": "https://raw.githubusercontent.com/%s/main/changelog.md"\n}\n' \
+            "$VERSION" "$VCODE" "$REPO" "$REL_TAG" "$VERSION" "$REPO" > update.json
 
       - name: 构建模块 zip
         if: steps.check.outputs.skip != 'true'
@@ -159,7 +168,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add module.prop update.json
+          git add module.prop update.json changelog.md
           if [ "${{ steps.check.outputs.core_updated }}" = "true" ]; then
             git commit -m "chore: 更新 sing-box 核心至 ${{ steps.check.outputs.version }}" || true
           else
