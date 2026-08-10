@@ -1,0 +1,255 @@
+//! 单元测试: 白名单生成逻辑 (whitelist.zig) + 进程存活检查 (context.zig)
+//! 运行: zig build test
+//!
+//! 测试不碰真实设备: 在 /tmp 下建独立目录组装 Context, 用 stub 占位, 全部本机完成。
+
+const std = @import("std");
+const context = @import("context.zig");
+const whitelist = @import("whitelist.zig");
+
+const Context = context.Context;
+
+// ---------------------------------------------------------------------------
+// 测试脚手架: 临时目录 + 最小 Context
+// ---------------------------------------------------------------------------
+
+const TestEnv = struct {
+    gpa: std.mem.Allocator,
+    threaded: *std.Io.Threaded, // 堆分配: io 的 userdata 指向它, 实例不能随结构体拷贝而移动
+    io: std.Io,
+    root: []const u8,
+    moddir: []const u8,
+    data_dir: []const u8,
+    ctx: Context,
+
+    fn init(gpa: std.mem.Allocator) !TestEnv {
+        // 0.17 dev 的 std.testing.io 未初始化 (vtable 是垃圾值), 每个测试自建 Threaded
+        const threaded = try gpa.create(std.Io.Threaded);
+        threaded.* = std.Io.Threaded.init(gpa, .{});
+        const io = threaded.io();
+        const root = try std.fmt.allocPrint(gpa, "/tmp/sing-box-init-test-{d}-{x}", .{ std.os.linux.getpid(), @intFromPtr(threaded) });
+        const moddir = try std.Io.Dir.path.join(gpa, &.{ root, "module" });
+        const data_dir = try std.Io.Dir.path.join(gpa, &.{ root, "data" });
+        // 建目录 + module.prop (Context 的模块目录检查依赖它)
+        const cwd = std.Io.Dir.cwd();
+        try cwd.createDirPath(io, moddir);
+        try cwd.createDirPath(io, data_dir);
+        const prop_path = try std.Io.Dir.path.join(gpa, &.{ moddir, "module.prop" });
+        defer gpa.free(prop_path);
+        try cwd.writeFile(io, .{ .sub_path = prop_path, .data = "id=sing-box-init\nversion=test\n" });
+        const ctx = try Context.init(gpa, io, moddir, data_dir);
+        return .{ .gpa = gpa, .threaded = threaded, .io = io, .root = root, .moddir = moddir, .data_dir = data_dir, .ctx = ctx };
+    }
+
+    fn deinit(self: *TestEnv) void {
+        self.ctx.deinit();
+        std.Io.Dir.cwd().deleteTree(self.io, self.root) catch {};
+        self.gpa.free(self.root);
+        self.gpa.free(self.moddir);
+        self.gpa.free(self.data_dir);
+        self.threaded.deinit();
+        self.gpa.destroy(self.threaded);
+    }
+
+    /// 写一个 conf.d 配置文件
+    fn writeConf(self: *TestEnv, name: []const u8, content: []const u8) !void {
+        const path = try std.Io.Dir.path.join(self.gpa, &.{ self.ctx.conf_dir, name });
+        defer self.gpa.free(path);
+        try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = content });
+    }
+
+    /// 写白名单文件
+    fn writePkgs(self: *TestEnv, content: []const u8) !void {
+        try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = self.ctx.include_package, .data = content });
+    }
+
+    /// 读生成目录里的文件内容
+    fn readGen(self: *TestEnv, name: []const u8) ![]u8 {
+        const path = try std.Io.Dir.path.join(self.gpa, &.{ self.ctx.gen_dir, name });
+        defer self.gpa.free(path);
+        const content = try self.ctx.readFileAlloc(path);
+        return content; // 调用方 free
+    }
+};
+
+// ---------------------------------------------------------------------------
+// 测试用例
+// ---------------------------------------------------------------------------
+
+test "ebpf 配置: 注入 include_package, 无 ebpf 的文件保持原样" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json",
+        \\{ "inbounds": [ { "type": "ebpf", "tag": "in", "dns_mode": "hijack" } ] }
+    );
+    try env.writeConf("route.json",
+        \\{ "route": { "rules": [ { "action": "reject" } ] } }
+    );
+    try env.writePkgs("com.example.a\ncom.example.b\n");
+
+    try std.testing.expect(whitelist.run(&env.ctx));
+
+    const out = try env.readGen("config.json");
+    defer env.gpa.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    const inbounds = parsed.value.object.get("inbounds").?.array;
+    const ip = inbounds.items[0].object.get("include_package").?.array;
+    try std.testing.expectEqual(@as(usize, 2), ip.items.len);
+    try std.testing.expectEqualSlices(u8, "com.example.a", ip.items[0].string);
+    try std.testing.expectEqualSlices(u8, "com.example.b", ip.items[1].string);
+
+    // 无 ebpf 的文件保持原样 (不重写, 格式不变)
+    const route_out = try env.readGen("route.json");
+    defer env.gpa.free(route_out);
+    try std.testing.expectEqualSlices(u8, "{ \"route\": { \"rules\": [ { \"action\": \"reject\" } ] } }", std.mem.trim(u8, route_out, "\n"));
+    // 不应生成路由规则文件 (有 ebpf 入站时走注入路径)
+    const rules_path = try std.Io.Dir.path.join(env.gpa, &.{ env.ctx.gen_dir, "00-include-package.json" });
+    defer env.gpa.free(rules_path);
+    try std.testing.expect(!context.fileExistsAt(env.io, rules_path));
+}
+
+test "已有 include_package: 整体替换" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json",
+        \\{ "inbounds": [ { "type": "ebpf", "include_package": ["old.pkg"] } ] }
+    );
+    try env.writePkgs("new.pkg\n");
+
+    try std.testing.expect(whitelist.run(&env.ctx));
+    const out = try env.readGen("config.json");
+    defer env.gpa.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    const ip = parsed.value.object.get("inbounds").?.array.items[0].object.get("include_package").?.array;
+    try std.testing.expectEqual(@as(usize, 1), ip.items.len);
+    try std.testing.expectEqualSlices(u8, "new.pkg", ip.items[0].string);
+}
+
+test "无 ebpf (tun 模式): 写路由规则 00-include-package.json" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json",
+        \\{ "inbounds": [ { "type": "tun", "tag": "tun-in" } ] }
+    );
+    try env.writePkgs("com.example.a\n");
+
+    try std.testing.expect(whitelist.run(&env.ctx));
+
+    const out = try env.readGen("00-include-package.json");
+    defer env.gpa.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    const rule = parsed.value.object.get("route").?.object.get("rules").?.array.items[0].object;
+    try std.testing.expectEqualSlices(u8, "route", rule.get("action").?.string);
+    const names = rule.get("package_name").?.array;
+    try std.testing.expectEqual(@as(usize, 1), names.items.len);
+    try std.testing.expectEqualSlices(u8, "com.example.a", names.items[0].string);
+
+    // 原始配置未被注入, 保持原样
+    const orig = try env.readGen("config.json");
+    defer env.gpa.free(orig);
+    try std.testing.expectEqualSlices(u8, "{ \"inbounds\": [ { \"type\": \"tun\", \"tag\": \"tun-in\" } ] }", std.mem.trim(u8, orig, "\n"));
+}
+
+test "白名单过滤: 注释 / 空行 / CR / 首尾空白" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json",
+        \\{ "inbounds": [ { "type": "ebpf" } ] }
+    );
+    try env.writePkgs(
+        \\# 注释行
+        \\   # 带缩进注释
+        \\
+        \\  com.example.a  
+        \\com.example.b
+        \\com.example.c
+    );
+    try std.testing.expect(whitelist.run(&env.ctx));
+
+    const out = try env.readGen("config.json");
+    defer env.gpa.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    const ip = parsed.value.object.get("inbounds").?.array.items[0].object.get("include_package").?.array;
+    try std.testing.expectEqual(@as(usize, 3), ip.items.len);
+    try std.testing.expectEqualSlices(u8, "com.example.a", ip.items[0].string);
+    try std.testing.expectEqualSlices(u8, "com.example.b", ip.items[1].string);
+    try std.testing.expectEqualSlices(u8, "com.example.c", ip.items[2].string);
+}
+
+test "include_package 缺失: 白名单关闭, 配置原样加载" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json",
+        \\{ "inbounds": [ { "type": "ebpf" } ] }
+    );
+    // 不写 include_package 文件
+    try std.testing.expect(whitelist.run(&env.ctx));
+    const out = try env.readGen("config.json");
+    defer env.gpa.free(out);
+    try std.testing.expectEqualSlices(u8, "{ \"inbounds\": [ { \"type\": \"ebpf\" } ] }", std.mem.trim(u8, out, "\n"));
+}
+
+test "非法 JSON: 生成失败 (返回 false), 不产出注入结果" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json", "{ inbounds: [ { type: ebpf } ] }"); // 非严格 JSON
+    try env.writePkgs("com.example.a\n");
+    try std.testing.expect(!whitelist.run(&env.ctx));
+}
+
+test "多 ebpf 入站: 全部注入" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json",
+        \\{ "inbounds": [ { "type": "ebpf", "tag": "a" }, { "type": "ebpf", "tag": "b" } ] }
+    );
+    try env.writePkgs("com.example.a\n");
+    try std.testing.expect(whitelist.run(&env.ctx));
+
+    const out = try env.readGen("config.json");
+    defer env.gpa.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    const inbounds = parsed.value.object.get("inbounds").?.array;
+    for (inbounds.items) |item| {
+        try std.testing.expectEqualSlices(u8, "com.example.a", item.object.get("include_package").?.array.items[0].string);
+    }
+}
+
+test "多文件: 一个含 ebpf, 一个不含 → 只注入前者, 不写路由规则" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("a.json",
+        \\{ "inbounds": [ { "type": "ebpf" } ] }
+    );
+    try env.writeConf("b.json",
+        \\{ "route": { "final": "direct" } }
+    );
+    try env.writePkgs("com.example.a\n");
+    try std.testing.expect(whitelist.run(&env.ctx));
+
+    const a = try env.readGen("a.json");
+    defer env.gpa.free(a);
+    try std.testing.expect(std.mem.indexOf(u8, a, "include_package") != null);
+
+    const b = try env.readGen("b.json");
+    defer env.gpa.free(b);
+    try std.testing.expect(std.mem.indexOf(u8, b, "include_package") == null);
+
+    const rules_path = try std.Io.Dir.path.join(env.gpa, &.{ env.ctx.gen_dir, "00-include-package.json" });
+    defer env.gpa.free(rules_path);
+    try std.testing.expect(!context.fileExistsAt(env.io, rules_path));
+}
+
+test "pidAlive: /proc 存活检查 (sing-box 关键字)" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    // 当前测试进程的 cmdline 不含 "sing-box" → 视为不存活 (尽管进程在跑)
+    try std.testing.expect(!env.ctx.pidAlive(std.os.linux.getpid()));
+    // 未知 pid → 不存活
+    try std.testing.expect(!env.ctx.pidAlive(99999999));
+}

@@ -31,6 +31,10 @@ rm -f "$ARCHIVE"
 set_perm "$MODPATH/bin/sing-box" 0 0 0755
 ui_print "[sing-box-init] sing-box 已安装到 $MODPATH/bin/sing-box"
 
+# Zig 守护进程二进制: zip 解压可能丢 +x, 必须显式设权限
+# (daemon.sh 是 sh 包装经 sh 调用, 不依赖可执行位; 二进制本身需要)
+set_perm "$MODPATH/bin/sing-box-init" 0 0 0755
+
 # 确保脚本可执行 (安装器解压出的 zip 权限可能不含 +x)
 chmod 0755 "$MODPATH"/*.sh 2>/dev/null
 

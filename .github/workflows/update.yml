@@ -135,6 +135,13 @@ jobs:
           printf '{\n  "version": "v%s",\n  "versionCode": %s,\n  "zipUrl": "https://github.com/%s/releases/download/%s/sing-box-init-v%s.zip",\n  "changelog": "https://raw.githubusercontent.com/%s/main/changelog.md"\n}\n' \
             "$VERSION" "$VCODE" "$REPO" "$REL_TAG" "$VERSION" "$REPO" > update.json
 
+      - name: 安装 Zig (0.17-dev, 与本地开发版 API 对齐)
+        if: steps.check.outputs.skip != 'true'
+        uses: mlugg/setup-zig@v1
+        with:
+          # 锁定官方索引里的 master 快照, 避免 dev API 漂移导致构建失败
+          version: 0.17.0-dev.1662+cc6f42302
+
       - name: 构建模块 zip
         if: steps.check.outputs.skip != 'true'
         run: |

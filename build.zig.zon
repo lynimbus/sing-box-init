@@ -1,0 +1,12 @@
+.{
+    .name = .sing_box_init,
+    .version = "1.14.0-beta.13",
+    .fingerprint = 0x74f15bd54246cb8a,
+    .minimum_zig_version = "0.17.0-dev.1567+f0354179a",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

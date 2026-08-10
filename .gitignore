@@ -1,3 +1,6 @@
 tmp/
 bin/
 *.zip
+
+zig-out/
+.zig-cache/
