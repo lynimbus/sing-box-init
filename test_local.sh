@@ -86,9 +86,9 @@ echo "== status (运行中) =="
 SBX status
 grep -q "^description=sing-box: 运行中" "$T/module/module.prop" && echo "module.prop 描述已更新 ✓" || { echo "FAIL: 描述未更新"; cat "$T/module/module.prop"; exit 1; }
 
-echo "== 模拟禁用模块 (disable 标记) =="
+echo "== 模拟禁用模块 (disable 标记, 事件驱动 <1s) =="
 touch "$T/module/disable"
-sleep 4   # 看门狗 3 秒轮询
+sleep 2   # inotify 事件驱动, 比旧版 3 秒轮询快得多
 kill -0 "$SPID" 2>/dev/null && { echo "FAIL: 禁用后 sing-box 还在跑"; exit 1; }
 echo "禁用后 sing-box 已停 ✓ (看门狗仍存活)"
 kill -0 "$WPID" 2>/dev/null && echo "看门狗保持存活 ✓" || { echo "FAIL: 看门狗也死了"; exit 1; }
@@ -99,6 +99,35 @@ sleep 4
 SPID2=$(cat "$T/data/sing-box.pid" 2>/dev/null || echo 无)
 [ "$SPID2" = 无 ] && { echo "FAIL: 重新启用后未拉起 sing-box"; exit 1; }
 kill -0 "$SPID2" 2>/dev/null && echo "重新启用后 sing-box 自动拉起 ✓ (新 pid $SPID2)" || { echo "FAIL: 新 sing-box 未存活"; exit 1; }
+
+echo "== 崩溃自动恢复 (kill -9, signalfd 即时检测) =="
+CRASH_PID=$(cat "$T/data/sing-box.pid")
+kill -9 "$CRASH_PID"
+sleep 1   # signalfd 事件驱动: 崩溃 1 秒内应被检测并记录
+grep -q "exited unexpectedly" "$T/data/logs/watchdog.log" && echo "崩溃即时检测 ✓ (<1s)" || { echo "FAIL: 崩溃未及时检测"; exit 1; }
+sleep 5   # 退避 3s + 拉起
+RECOVER_PID=$(cat "$T/data/sing-box.pid" 2>/dev/null || echo 无)
+[ "$RECOVER_PID" = 无 ] && { echo "FAIL: 崩溃后未自动拉起"; exit 1; }
+[ "$CRASH_PID" = "$RECOVER_PID" ] && { echo "FAIL: pid 未变化"; exit 1; }
+kill -0 "$RECOVER_PID" 2>/dev/null || { echo "FAIL: 恢复后的 sing-box 未存活"; exit 1; }
+echo "崩溃后自动恢复 ✓ (pid $CRASH_PID → $RECOVER_PID)"
+
+echo "== 白名单热重载 (改 include_package, 无需手动重启) =="
+OLD_PID=$(cat "$T/data/sing-box.pid")
+printf 'com.example.app1\ncom.example.app3\n' > "$T/data/include_package"
+sleep 2   # inotify 捕获变化 → 自动 restart
+NEW_PID=$(cat "$T/data/sing-box.pid")
+[ "$OLD_PID" = "$NEW_PID" ] && { echo "FAIL: 热重载后 pid 未变 (sing-box 未重启)"; exit 1; }
+kill -0 "$NEW_PID" 2>/dev/null || { echo "FAIL: 热重载后的 sing-box 未存活"; exit 1; }
+echo "热重载触发重启 ✓ (pid $OLD_PID → $NEW_PID)"
+python3 - "$T/data/conf.d.generated/config.json" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+ip = cfg["inbounds"][0].get("include_package")
+assert ip == ["com.example.app1", "com.example.app3"], f"热重载注入失败: {ip}"
+print("新白名单已生效 ✓:", ip)
+PY
+grep -q "sing-box started" "$T/data/logs/watchdog.log" && echo "看门狗日志有重启记录 ✓"
 
 echo "== stop (卸载路径) =="
 SBX stop

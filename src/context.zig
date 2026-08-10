@@ -400,6 +400,12 @@ pub const Context = struct {
     pub fn sleep(self: *Context, secs: i64) void {
         std.Io.sleep(self.io, std.Io.Duration.fromSeconds(secs), .boot) catch {};
     }
+
+    /// 睡眠 (毫秒, 状态机事件循环用)
+    pub fn sleepMs(self: *Context, ms: i32) void {
+        if (ms <= 0) return;
+        std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(ms), .boot) catch {};
+    }
 };
 
 // ---------------------------------------------------------------------------

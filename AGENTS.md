@@ -9,7 +9,13 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 - `src/` — Zig 源码（设备端守护进程 + 白名单生成）
   - `main.zig` — 入口：子命令分发 `start|stop|restart|status|update_desc|watchdog_loop`，模块目录/数据目录解析。argv 与 env 从 `/proc/self/cmdline`、`/proc/self/environ` 读取（不依赖 dev 版变动频繁的 std.process args/env API）
   - `context.zig` — `Context`：集中管理路径/IO/日志/进程（0.17 版 std 全面 Io 化后的收拢点）。含 `log`（时间戳用 `date` 子进程，与 shell 版格式一致）、`pidAlive`（/proc 检查）、`moduleDisabled`、`updateDesc`（双写）、`spawnQuiet`/`reap` 等
-  - `daemon.zig` — 看门狗引擎：start/stop/restart/status/watchdog_loop，行为与旧 shell 版一一对应
+  - `daemon.zig` — 子命令入口：start/stop/restart/status/watchdog_loop
+  - `watchdog.zig` — **看门狗引擎：显式状态机 + 事件驱动**（2026-08-11 方案 B）
+    - 状态：`disabled / starting / running / stopping / crash_backoff / exiting`
+    - 事件：`disable_on/off`、`stop_flag`、`whitelist_changed`、`singbox_started/exited`、`timeout`
+    - 事件源：**inotify**（监听 $MODDIR 与 $DATA_DIR，disable/.stop/include_package 变化即时唤醒）+ **signalfd**（阻塞 SIGCHLD，sing-box 退出即时得知）+ poll 定时器（按状态精确控制拉起确认 5s / 强杀 10s / 崩溃退避 3s）
+    - `transition()` 是纯函数（无副作用，可单测）；`tick()` 每次仍**全量重查标志**作权威，事件丢失最多退化为 3s 轮询（不劣于旧版）
+    - **白名单热重载**：include_package 变化（inotify CLOSE_WRITE/MOVED_TO）→ 自动重启 sing-box，用户无需再手动点 Action
   - `whitelist.zig` — 应用白名单生成（替代旧 whitelist.sh + whitelist.awk）
   - `tests.zig` — 单元测试（`zig build test`，白名单注入逻辑 + pidAlive）
 - `build.zig` / `build.zig.zon` — Zig 构建配置（`exe.single_threaded = true`：看门狗是纯轮询进程，无线程更可靠）
@@ -50,7 +56,13 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 10. 改版本时 `version` 和 `versionCode`（整数）要同步；`version` 会被 build.sh 拼进 zip 文件名。（例外：工作流的纯项目更新只动 `versionCode`，`version` 跟随核心版本不变。）
 11. 用户可见输出和注释用中文（现有风格）。Zig 代码同样中文注释。
 12. **模块开关 = sing-box 开关**（用户需求）：Manager 禁用/启用模块 = 创建/删除 `disable` 标记文件（ksud 只动标记文件）。`moduleDisabled()` 检查 `$MODDIR/disable`（另有 `remove` 待卸载标记、模块目录不存在兜底），看门狗每 3 秒轮询，禁用 → 停 sing-box 且看门狗保持存活，重新启用 → 自动拉起。⚠️ 若模块从未被启用过（禁用状态下开机 → service.sh 不执行 → 无看门狗），重新启用后不会立即拉起，需点一次 Action 或重启设备。
-13. **僵尸进程**：看门狗用 pid 管理 sing-box（不是 Child 句柄），停止/重启后必须 `reap()`（waitpid）收尸，否则进程表泄漏（本机 e2e 踩过）。同理**不要 spawn 不存在的命令**（ksud 先查 PATH）。
+13. **僵尸进程**：看门狗用 pid 管理 sing-box（不是 Child 句柄），停止/重启后必须 `reap()`（waitpid）收尸，否则进程表泄漏（本机 e2e 踩过）。同理**不要 spawn 不存在的命令**（ksud 先查 PATH）。状态机版在 tick 里统一 `waitpid(-1, WNOHANG)` 收割所有子进程。
+14. **事件驱动实现细节（watchdog.zig）**：
+    - signalfd 的 read 缓冲区必须 ≥ `sizeof(signalfd_siginfo)`（128B），否则 EINVAL panic（真机踩过）
+    - 阻塞 SIGCHLD 后 `process.run`/`waitpid` 不受影响；date/ksud 等辅助进程的 SIGCHLD 也会唤醒 poll，收割后忽略
+    - inotify 只负责"提前唤醒"和 include_package 变化提示；disable/.stop 标志由 tick 全量重查（权威）
+    - 热重载只消费 running 状态的白名单事件；starting/disabled 收到则丢弃（重新生成配置时会覆盖）
+    - 事件源初始化失败 → 优雅降级为纯 3s 轮询（行为同旧版）
 
 ## Zig / 0.17-dev 特有坑（写代码必看）
 
@@ -66,7 +78,7 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 
 - 语法检查（shell 包装）：`sh -n *.sh`。
 - Zig 单测：`zig build test`（白名单注入/替换/路由规则/非法 JSON/过滤/pidAlive）。
-- 端到端：`sh test_local.sh`——在 /tmp/sbx-e2e 下建假模块目录 + stub sing-box（`#!/bin/sh while true; sleep 10`），走 start→白名单验证→禁用→重新启用→stop 全流程，验证 pid 文件与零残留。**注意：残留进程清理靠读旧 pid 文件 kill（不能用 pkill -f，模式会匹配到自己的命令行）**。
+- 端到端：`sh test_local.sh`——在 /tmp/sbx-e2e 下建假模块目录 + stub sing-box（`#!/bin/sh while true; sleep 10`），走 start→白名单验证→**禁用（事件驱动 <1s）**→重新启用→**崩溃 kill -9 即时检测+自动恢复**→**白名单热重载（无需手动重启）**→stop 全流程，验证 pid 文件与零残留。**注意：残留进程清理靠读旧 pid 文件 kill（不能用 pkill -f，模式会匹配到自己的命令行）**。
 - 交叉编译设备版：`zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall`（产物 zig-out/bin/sing-box-init）。
 - 本机测试用 `SING_BOX_DATA_DIR=/tmp/...` 环境变量重定向数据目录（二进制原生支持，不需要 sudo）。
 

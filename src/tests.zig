@@ -6,6 +6,7 @@
 const std = @import("std");
 const context = @import("context.zig");
 const whitelist = @import("whitelist.zig");
+const watchdog = @import("watchdog.zig");
 
 const Context = context.Context;
 
@@ -252,4 +253,89 @@ test "pidAlive: /proc 存活检查 (sing-box 关键字)" {
     try std.testing.expect(!env.ctx.pidAlive(std.os.linux.getpid()));
     // 未知 pid → 不存活
     try std.testing.expect(!env.ctx.pidAlive(99999999));
+}
+
+// ---------------------------------------------------------------------------
+// 状态机测试 (watchdog.zig): transition 是纯函数, 直接喂事件序列验证
+// ---------------------------------------------------------------------------
+
+const State = watchdog.State;
+const Event = watchdog.Event;
+const StopReason = watchdog.StopReason;
+
+test "状态机: 生命周期主路径 (禁用→启用→运行→崩溃→热重载→停止)" {
+    var st = State.starting;
+    // 拉起成功 → 运行
+    st = watchdog.transition(st, .singbox_started, .disabled);
+    try std.testing.expectEqual(State.running, st);
+    // 崩溃 → 退避 → 重试
+    st = watchdog.transition(st, .singbox_exited, .disabled);
+    try std.testing.expectEqual(State.crash_backoff, st);
+    st = watchdog.transition(st, .timeout, .disabled);
+    try std.testing.expectEqual(State.starting, st);
+    // 白名单热重载: 停 → 自动拉起 (不走 disabled)
+    st = watchdog.transition(st, .singbox_started, .disabled);
+    st = watchdog.transition(st, .whitelist_changed, .whitelist);
+    try std.testing.expectEqual(State.stopping, st);
+    st = watchdog.transition(st, .singbox_exited, .whitelist);
+    try std.testing.expectEqual(State.starting, st);
+    // 模块禁用: 停 → disabled → 重新启用 → 自动拉起
+    st = watchdog.transition(st, .disable_on, .disabled);
+    try std.testing.expectEqual(State.stopping, st);
+    st = watchdog.transition(st, .singbox_exited, .disabled);
+    try std.testing.expectEqual(State.disabled, st);
+    st = watchdog.transition(st, .disable_off, .disabled);
+    try std.testing.expectEqual(State.starting, st);
+    // 收到 .stop → 退出
+    st = watchdog.transition(st, .stop_flag, .disabled);
+    try std.testing.expectEqual(State.exiting, st);
+}
+
+test "状态机: 启动失败 → 退避重试; 拉起中禁用 → 停止" {
+    var st = State.starting;
+    // 确认超时 = 启动失败 → 退避
+    st = watchdog.transition(st, .timeout, .disabled);
+    try std.testing.expectEqual(State.crash_backoff, st);
+    // 退避期间禁用 → disabled
+    st = watchdog.transition(st, .disable_on, .disabled);
+    try std.testing.expectEqual(State.disabled, st);
+    // 重新启用
+    st = watchdog.transition(st, .disable_off, .disabled);
+    try std.testing.expectEqual(State.starting, st);
+    // 拉起中又禁用 → stopping
+    st = watchdog.transition(st, .disable_on, .disabled);
+    try std.testing.expectEqual(State.stopping, st);
+    // 停止中再次禁用 → 仍 disabled
+    st = watchdog.transition(st, .disable_on, .disabled);
+    try std.testing.expectEqual(State.disabled, st);
+}
+
+test "状态机: 禁用状态忽略无关事件, 停止中忽略白名单, 退避中崩溃事件幂等" {
+    // disabled 状态下白名单变化/崩溃/超时都不影响
+    try std.testing.expectEqual(State.disabled, watchdog.transition(.disabled, .whitelist_changed, .disabled));
+    try std.testing.expectEqual(State.disabled, watchdog.transition(.disabled, .singbox_exited, .disabled));
+    try std.testing.expectEqual(State.disabled, watchdog.transition(.disabled, .timeout, .disabled));
+    // running 状态白名单变化 → stopping (reason=whitelist)
+    try std.testing.expectEqual(State.stopping, watchdog.transition(.running, .whitelist_changed, .whitelist));
+    // stopping 状态忽略白名单/启动事件
+    try std.testing.expectEqual(State.stopping, watchdog.transition(.stopping, .whitelist_changed, .disabled));
+    try std.testing.expectEqual(State.stopping, watchdog.transition(.stopping, .singbox_started, .disabled));
+    // crash_backoff 状态幂等
+    try std.testing.expectEqual(State.crash_backoff, watchdog.transition(.crash_backoff, .singbox_exited, .disabled));
+    // exiting 终态
+    try std.testing.expectEqual(State.exiting, watchdog.transition(.exiting, .disable_off, .disabled));
+    try std.testing.expectEqual(State.exiting, watchdog.transition(.exiting, .timeout, .disabled));
+}
+
+test "状态机: 全转换矩阵可穷举, 无 panic (回归保护)" {
+    const states = [_]State{ .disabled, .starting, .running, .stopping, .crash_backoff, .exiting };
+    const events = [_]Event{ .disable_on, .disable_off, .stop_flag, .whitelist_changed, .singbox_started, .singbox_exited, .timeout };
+    const reasons = [_]StopReason{ .disabled, .whitelist };
+    for (states) |st| {
+        for (events) |ev| {
+            for (reasons) |rs| {
+                _ = watchdog.transition(st, ev, rs);
+            }
+        }
+    }
 }
