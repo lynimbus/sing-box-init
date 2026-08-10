@@ -12,5 +12,5 @@ if ! command -v zip >/dev/null 2>&1; then
 fi
 
 rm -f "$OUT"
-zip -q -r "$OUT" module.prop customize.sh service.sh daemon.sh action.sh uninstall.sh build.sh config webroot bin
+zip -q -r "$OUT" module.prop customize.sh service.sh daemon.sh action.sh uninstall.sh build.sh whitelist.sh whitelist.awk config webroot bin
 echo "已生成: $OUT"

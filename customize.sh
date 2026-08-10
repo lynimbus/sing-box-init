@@ -36,9 +36,18 @@ chmod 0755 "$MODPATH"/*.sh 2>/dev/null
 
 # 初始化配置目录 (配置持久化在 /data/adb/sing-box, 不受模块更新/卸载影响)
 # 布局: conf.d/ 为 sing-box 配置目录 (-C 模式), 目录内 json 全部合并 (数组追加, 勿重复定义同 tag 的 inbound/outbound)
-#       ebpf 白名单入站放在独立的 bypass-apps.json, 加应用只改它的 include_package
+#       默认示例配置 config.json 已含唯一 ebpf 入站, 加应用只改 include_package 纯文本文件
 DATA_DIR=/data/adb/sing-box
 mkdir -p "$DATA_DIR" "$DATA_DIR/logs" "$DATA_DIR/conf.d"
+
+# 旧版独立 ebpf 入站文件迁移: 新版默认 config.json 已含 ebpf 入站 (示例),
+# 仅当 conf.d/config.json 不存在 (将用新版示例) 时移除遗留的 bypass-apps.json, 避免两个 ebpf 入站打架
+# 用户已有自己的 config.json 时保留不动 (由用户自行决定去留)
+if [ ! -f "$DATA_DIR/conf.d/config.json" ] && [ -f "$DATA_DIR/conf.d/bypass-apps.json" ]; then
+    rm -f "$DATA_DIR/conf.d/bypass-apps.json"
+    ui_print "[sing-box-init] 已清理旧版 bypass-apps.json (ebpf 入站已并入默认 config.json)"
+fi
+
 if [ ! -f "$DATA_DIR/conf.d/config.json" ]; then
     if [ -f "$DATA_DIR/config.json" ]; then
         cp -f "$DATA_DIR/config.json" "$DATA_DIR/conf.d/config.json"
@@ -51,11 +60,14 @@ else
     ui_print "[sing-box-init] 检测到已有配置, 保留: $DATA_DIR/conf.d/config.json"
 fi
 
-# ebpf 白名单入站文件 (唯一的 ebpf 入站 + include_package 白名单), 仅不存在时复制, 不覆盖用户改动
-# 白名单 = 走代理的应用, 其余应用在内核层直接绕过; 包名启动时解析, 装/删/重装应用后需重启生效
-if [ ! -f "$DATA_DIR/conf.d/bypass-apps.json" ]; then
-    cp -f "$MODPATH/config/bypass-apps.json" "$DATA_DIR/conf.d/bypass-apps.json"
-    ui_print "[sing-box-init] 已生成应用白名单配置: $DATA_DIR/conf.d/bypass-apps.json"
+# ebpf 入站已包含在默认 config.json 示例中 (静态参数; include_package 由 daemon.sh 启动时注入), 不再有独立 bypass-apps.json
+
+# 应用白名单文件 (纯文本, 每行一个包名 = 走代理的应用; 空行/# 注释忽略), 仅不存在时复制, 不覆盖用户改动
+# daemon.sh 启动时读取并注入正式配置 (ebpf 入站 -> include_package, 非 ebpf -> 路由规则)
+# 若用户已把 include_package 改名成 include_package.disable (关闭白名单), 更新/重装模块时也不重新生成, 保持禁用状态
+if [ ! -f "$DATA_DIR/include_package" ] && [ ! -f "$DATA_DIR/include_package.disable" ]; then
+    cp -f "$MODPATH/config/include_package" "$DATA_DIR/include_package"
+    ui_print "[sing-box-init] 已生成应用白名单: $DATA_DIR/include_package"
 fi
 
 ui_print "[sing-box-init] 安装完成, 重启后自动生效"

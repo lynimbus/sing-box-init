@@ -3,19 +3,21 @@
     "level": "info",
     "timestamp": true
   },
+  "inbounds": [
+    {
+      "type": "ebpf",
+      "tag": "ebpf-in",
+      "dns_mode": "hijack",
+      "redirect_address": [
+        "127.128.0.0/9",
+        "fd53:696e:672d:626f::/64"
+      ]
+    }
+  ],
   "outbounds": [
     {
       "type": "direct",
       "tag": "direct"
     }
-  ],
-  "route": {
-    "rule_set": [
-      {
-        "type": "remote",
-        "tag": "geoip-cn-nodoh",
-        "url": "https://raw.githubusercontent.com/lynimbus/geoip-cn-nodoh/main/geoip-cn-nodoh.srs"
-      }
-    ]
-  }
+  ]
 }

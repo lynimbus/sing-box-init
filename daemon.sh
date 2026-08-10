@@ -12,6 +12,8 @@ DATA_DIR=${SING_BOX_DATA_DIR:-/data/adb/sing-box}
 CONFIG="$DATA_DIR/config.json"
 # 配置目录模式 (-C): 合并 conf.d/ 下所有 json (数组追加, 勿重复定义同 tag 的 inbound/outbound), 独立配置丢进 conf.d/ 即可, 不用改脚本
 CONF_DIR="$DATA_DIR/conf.d"
+# 生成目录: whitelist.sh 把 include_package 白名单注入后的配置写到此处, sing-box 用 -C 加载它 (不改用户配置原文)
+GEN_DIR="$DATA_DIR/conf.d.generated"
 LOG_DIR="$DATA_DIR/logs"
 PIDFILE="$DATA_DIR/sing-box.pid"
 WPIDFILE="$DATA_DIR/sing-box-watchdog.pid"
@@ -141,7 +143,17 @@ watchdog_loop() {
                 cp -f "$CONFIG" "$CONF_DIR/config.json" 2>/dev/null
             fi
             if [ -f "$CONF_DIR/config.json" ]; then
-                "$BIN" run -C "$CONF_DIR" >> "$LOG_DIR/sing-box.log" 2>&1 &
+                # 白名单生成: 读 include_package 纯文本 -> 有 ebpf 入站则注入入站, 否则写路由规则
+                # 输出到 GEN_DIR 再以 -C 启动; 生成失败 (awk 异常等) 回退直接用原始 conf.d
+                if [ ! -f "$DATA_DIR/include_package" ] && [ -f "$DATA_DIR/include_package.disable" ]; then
+                    log INFO "whitelist disabled (include_package renamed to .disable), config loaded as-is"
+                fi
+                if sh "$MODDIR/whitelist.sh" "$CONF_DIR" "$GEN_DIR" "$DATA_DIR/include_package"; then
+                    "$BIN" run -C "$GEN_DIR" >> "$LOG_DIR/sing-box.log" 2>&1 &
+                else
+                    log WARN "whitelist generation failed, fallback to raw conf.d"
+                    "$BIN" run -C "$CONF_DIR" >> "$LOG_DIR/sing-box.log" 2>&1 &
+                fi
             else
                 "$BIN" run -c "$CONFIG" >> "$LOG_DIR/sing-box.log" 2>&1 &
             fi
