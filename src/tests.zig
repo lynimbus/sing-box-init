@@ -327,9 +327,24 @@ test "状态机: 禁用状态忽略无关事件, 停止中忽略白名单, 退�
     try std.testing.expectEqual(State.exiting, watchdog.transition(.exiting, .timeout, .disabled));
 }
 
+test "状态机: 配置热重载与白名单热重载行为一致" {
+    // running + 配置变化 → stopping (热重载)
+    try std.testing.expectEqual(State.stopping, watchdog.transition(.running, .config_changed, .config));
+    // 停完 → 自动重新拉起 (不走 disabled)
+    try std.testing.expectEqual(State.starting, watchdog.transition(.stopping, .singbox_exited, .config));
+    // 热重载中又禁用 → 优先 disabled
+    try std.testing.expectEqual(State.disabled, watchdog.transition(.stopping, .disable_on, .config));
+    // running 状态白名单/配置变化都进 stopping
+    try std.testing.expectEqual(State.stopping, watchdog.transition(.running, .whitelist_changed, .whitelist));
+    try std.testing.expectEqual(State.stopping, watchdog.transition(.running, .config_changed, .config));
+    // 非 running 状态忽略配置变化事件
+    try std.testing.expectEqual(State.disabled, watchdog.transition(.disabled, .config_changed, .config));
+    try std.testing.expectEqual(State.crash_backoff, watchdog.transition(.crash_backoff, .config_changed, .config));
+}
+
 test "状态机: 全转换矩阵可穷举, 无 panic (回归保护)" {
     const states = [_]State{ .disabled, .starting, .running, .stopping, .crash_backoff, .exiting };
-    const events = [_]Event{ .disable_on, .disable_off, .stop_flag, .whitelist_changed, .singbox_started, .singbox_exited, .timeout };
+    const events = [_]Event{ .disable_on, .disable_off, .stop_flag, .whitelist_changed, .config_changed, .singbox_started, .singbox_exited, .timeout };
     const reasons = [_]StopReason{ .disabled, .whitelist };
     for (states) |st| {
         for (events) |ev| {

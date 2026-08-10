@@ -15,7 +15,9 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
     - 事件：`disable_on/off`、`stop_flag`、`whitelist_changed`、`singbox_started/exited`、`timeout`
     - 事件源：**inotify**（监听 $MODDIR 与 $DATA_DIR，disable/.stop/include_package 变化即时唤醒）+ **signalfd**（阻塞 SIGCHLD，sing-box 退出即时得知）+ poll 定时器（按状态精确控制拉起确认 5s / 强杀 10s / 崩溃退避 3s）
     - `transition()` 是纯函数（无副作用，可单测）；`tick()` 每次仍**全量重查标志**作权威，事件丢失最多退化为 3s 轮询（不劣于旧版）
-    - **白名单热重载**：include_package 变化（inotify CLOSE_WRITE/MOVED_TO）→ 自动重启 sing-box，用户无需再手动点 Action
+    - **白名单热重载**：include_package 变化（inotify CLOSE_WRITE/MOVED_TO）→ 自动重启 sing-box
+    - **配置热重载**：`conf.d/` 下任意 `*.json` 变化 → 自动重启（编辑器保存/原子替换都覆盖）；生成目录 `conf.d.generated/` 是 watch 盲区（自己写的），不会无限重启循环
+    - 热重载统一**去抖 800ms**（`reload_deadline`）：编辑器保存的多事件/连续修改自动顺延，稳定后一次重启
   - `whitelist.zig` — 应用白名单生成（替代旧 whitelist.sh + whitelist.awk）
   - `tests.zig` — 单元测试（`zig build test`，白名单注入逻辑 + pidAlive）
 - `build.zig` / `build.zig.zon` — Zig 构建配置（`exe.single_threaded = true`：看门狗是纯轮询进程，无线程更可靠）
@@ -61,7 +63,8 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
     - signalfd 的 read 缓冲区必须 ≥ `sizeof(signalfd_siginfo)`（128B），否则 EINVAL panic（真机踩过）
     - 阻塞 SIGCHLD 后 `process.run`/`waitpid` 不受影响；date/ksud 等辅助进程的 SIGCHLD 也会唤醒 poll，收割后忽略
     - inotify 只负责"提前唤醒"和 include_package 变化提示；disable/.stop 标志由 tick 全量重查（权威）
-    - 热重载只消费 running 状态的白名单事件；starting/disabled 收到则丢弃（重新生成配置时会覆盖）
+    - 热重载只消费 running 状态的 reload 事件（白名单/配置）；starting/disabled 收到则丢弃（重新生成配置时会覆盖）
+    - **⚠️ inotify `len` 字段不可信**：实测本内核把所有事件的 len 恒报为 16（name 区域圆整到 16 字节），必须用 **NUL 截断**解析 name（`eventName`），否则长短不一的文件名全部匹配失败（真机踩过，include_package 热重载曾因此静默失效）
     - 事件源初始化失败 → 优雅降级为纯 3s 轮询（行为同旧版）
 
 ## Zig / 0.17-dev 特有坑（写代码必看）
@@ -78,7 +81,7 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 
 - 语法检查（shell 包装）：`sh -n *.sh`。
 - Zig 单测：`zig build test`（白名单注入/替换/路由规则/非法 JSON/过滤/pidAlive）。
-- 端到端：`sh test_local.sh`——在 /tmp/sbx-e2e 下建假模块目录 + stub sing-box（`#!/bin/sh while true; sleep 10`），走 start→白名单验证→**禁用（事件驱动 <1s）**→重新启用→**崩溃 kill -9 即时检测+自动恢复**→**白名单热重载（无需手动重启）**→stop 全流程，验证 pid 文件与零残留。**注意：残留进程清理靠读旧 pid 文件 kill（不能用 pkill -f，模式会匹配到自己的命令行）**。
+- 端到端：`sh test_local.sh`——在 /tmp/sbx-e2e 下建假模块目录 + stub sing-box（`#!/bin/sh while true; sleep 10`），走 start→白名单验证→**禁用（事件驱动 <1s）**→重新启用→**崩溃 kill -9 即时检测+自动恢复**→**白名单热重载**→**配置热重载（改 conf.d/config.json）+ 无重启循环验证**→stop 全流程，验证 pid 文件与零残留。**注意：残留进程清理靠读旧 pid 文件 kill（不能用 pkill -f，模式会匹配到自己的命令行）**。
 - 交叉编译设备版：`zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall`（产物 zig-out/bin/sing-box-init）。
 - 本机测试用 `SING_BOX_DATA_DIR=/tmp/...` 环境变量重定向数据目录（二进制原生支持，不需要 sudo）。
 

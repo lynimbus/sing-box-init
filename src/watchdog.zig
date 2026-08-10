@@ -35,6 +35,14 @@ pub const State = enum {
 pub const StopReason = enum {
     disabled,  // 模块禁用 → 停完进 disabled 等启用
     whitelist, // 白名单热重载 → 停完重新拉起 (starting)
+    config,    // 配置文件热重载 → 停完重新拉起 (starting)
+};
+
+/// 热重载类型 (inotify 提示)
+pub const ReloadKind = enum {
+    none,
+    whitelist, // include_package 变化
+    config,    // conf.d/*.json 变化
 };
 
 /// 状态机事件
@@ -43,6 +51,7 @@ pub const Event = enum {
     disable_off,       // 标记消失 (重新启用)
     stop_flag,         // .stop 出现 → 退出
     whitelist_changed, // include_package 变化 → 热重载
+    config_changed,    // conf.d/*.json 变化 → 热重载
     singbox_started,   // sing-box 确认运行
     singbox_exited,    // sing-box 进程退出 (waitpid 捕到)
     timeout,           // 当前状态期限到期 (确认超时/退避结束)
@@ -68,14 +77,14 @@ pub fn transition(state: State, ev: Event, reason: StopReason) State {
         .running => switch (ev) {
             Event.singbox_exited => .crash_backoff,
             Event.disable_on => .stopping,
-            Event.whitelist_changed => .stopping,
+            Event.whitelist_changed, Event.config_changed => .stopping,
             Event.stop_flag => .exiting,
             else => .running,
         },
         .stopping => switch (ev) {
             Event.singbox_exited => switch (reason) {
                 .disabled => .disabled,
-                .whitelist => .starting,
+                .whitelist, .config => .starting,
             },
             Event.disable_on => .disabled,
             Event.stop_flag => .exiting,
@@ -104,9 +113,13 @@ pub const Fsm = struct {
     deadline_ms: ?i64,
     /// 停止阶段是否已强杀 (KILL 后只再等 5 秒, 不再重复发)
     force_killed: bool,
-    /// inotify 提示: include_package 变化 (仅 running 状态消费, 其余状态丢弃)
-    whitelist_dirty: bool,
+    /// inotify 提示: 热重载请求 (仅 running 状态消费, 其余状态丢弃)
+    /// 去抖: 事件后等 reload_debounce_ms 静默期再触发, 连续编辑自动顺延
+    reload_dirty: ReloadKind,
+    reload_deadline: ?i64,
 
+    /// 热重载去抖: 编辑器保存会产生多个事件, 等静默期后再重启
+    const reload_debounce_ms = 800;
     /// 拉起确认超时 / 优雅停止期限 / 崩溃退避 (毫秒)
     const start_confirm_ms = 5000;
     const stop_grace_ms = 10000;
@@ -122,7 +135,8 @@ pub const Fsm = struct {
             .singbox_pid = null,
             .deadline_ms = null,
             .force_killed = false,
-            .whitelist_dirty = false,
+            .reload_dirty = .none,
+            .reload_deadline = null,
         };
     }
 
@@ -151,8 +165,11 @@ pub const Fsm = struct {
 
     /// 一轮状态评估: 收割子进程 → 全量重查标志 → 合成事件 → 转换
     fn tick(self: *Fsm) void {
-        // 白名单变化只在 running 状态有意义 (其余状态重新生成配置时会覆盖)
-        if (self.state != .running) self.whitelist_dirty = false;
+        // 热重载只在 running 状态有意义 (其余状态重新生成配置时会覆盖)
+        if (self.state != .running) {
+            self.reload_dirty = .none;
+            self.reload_deadline = null;
+        }
         const singbox_exited = self.collectChildren();
 
         // 合成事件 (优先级: stop > 模块禁用 > 进程退出 > 白名单 > 启动确认 > 期限)
@@ -168,10 +185,21 @@ pub const Fsm = struct {
             ev = .singbox_exited;
         } else if (self.state == .stopping and self.singbox_pid == null) {
             ev = .singbox_exited; // 无进程可等 (spawn 前就被停) → 立即转出
-        } else if (self.state == .running and self.whitelist_dirty) {
-            self.whitelist_dirty = false;
-            ev = .whitelist_changed;
-            self.stop_reason = .whitelist;
+        } else if (self.state == .running and self.reloadDue()) {
+            const kind = self.reload_dirty;
+            self.reload_dirty = .none;
+            self.reload_deadline = null;
+            switch (kind) {
+                .none => unreachable,
+                .whitelist => {
+                    ev = .whitelist_changed;
+                    self.stop_reason = .whitelist;
+                },
+                .config => {
+                    ev = .config_changed;
+                    self.stop_reason = .config;
+                },
+            }
         } else if (self.state == .starting and self.confirmStarted()) {
             ev = .singbox_started;
         } else if (self.deadlineExpired()) {
@@ -222,10 +250,29 @@ pub const Fsm = struct {
     }
 
     /// 下次 poll 超时 (毫秒): 有期限状态精确到期限, 其余 3 秒兜底心跳
+    /// running 状态下热重载去抖期限优先 (精确到静默期结束, 不靠心跳)
     fn nextTimeoutMs(self: *Fsm) i32 {
+        if (self.state == .running) {
+            if (self.reload_deadline) |dl| {
+                return @intCast(@max(dl - nowMs(self.ctx), 0));
+            }
+        }
         const dl = self.deadline_ms orelse return heartbeat_ms;
         const remain = dl - nowMs(self.ctx);
         return @intCast(@max(remain, 0));
+    }
+
+    /// 热重载去抖是否到期 (running 状态消费)
+    fn reloadDue(self: *Fsm) bool {
+        if (self.reload_dirty == .none) return false;
+        const dl = self.reload_deadline orelse return false;
+        return nowMs(self.ctx) >= dl;
+    }
+
+    /// 记录热重载请求 (inotify 事件触发): 重置去抖静默期
+    fn notifyReload(self: *Fsm, kind: ReloadKind) void {
+        self.reload_dirty = kind;
+        self.reload_deadline = nowMs(self.ctx) + reload_debounce_ms;
     }
 
     /// 优雅停止超时 → 强杀 (KILL 后只再等 5 秒)
@@ -355,6 +402,7 @@ const EventSource = struct {
     inotify_fd: std.posix.fd_t,
     moddir_wd: ?i32,
     datadir_wd: ?i32,
+    confdir_wd: ?i32,
     signalfd_fd: std.posix.fd_t,
     /// inotify 事件缓冲 (一次性读完)
     buf: [8192]u8,
@@ -372,6 +420,8 @@ const EventSource = struct {
         errdefer _ = std.os.linux.close(inotify_fd);
         const moddir_wd = addWatch(inotify_fd, ctx.moddir);
         const datadir_wd = addWatch(inotify_fd, ctx.data_dir);
+        // 用户配置目录 conf.d/ (注意: 绝不监听生成目录 conf.d.generated/, 那是自己写的, 会无限重启)
+        const confdir_wd = addWatch(inotify_fd, ctx.conf_dir);
         // --- signalfd: 阻塞 SIGCHLD, 子进程退出即时唤醒 ---
         var set = std.posix.sigemptyset();
         std.posix.sigaddset(&set, .CHLD);
@@ -387,6 +437,7 @@ const EventSource = struct {
             .inotify_fd = inotify_fd,
             .moddir_wd = moddir_wd,
             .datadir_wd = datadir_wd,
+            .confdir_wd = confdir_wd,
             .signalfd_fd = signalfd_fd,
             .buf = undefined,
         };
@@ -429,12 +480,16 @@ const EventSource = struct {
             const mask = ev.mask;
             // 队列溢出: 事件可能丢失 → tick 的全量重查会兜底, 无需处理
             if (mask & std.os.linux.IN.Q_OVERFLOW == 0) {
-                if (ev.wd == (self.datadir_wd orelse -1)) {
+                const write_or_move = mask & (std.os.linux.IN.CLOSE_WRITE | std.os.linux.IN.MOVED_TO) != 0;
+                if (ev.wd == (self.datadir_wd orelse -1) and write_or_move) {
+                    // 白名单变化 (mv 走 MOVED_TO, 编辑器保存走 CLOSE_WRITE)
                     if (nameIs(ev, data, off, "include_package")) {
-                        // 写入或 mv 进来 → 白名单已变化 (mv 走 MOVED_TO, 编辑器保存走 CLOSE_WRITE)
-                        if (mask & (std.os.linux.IN.CLOSE_WRITE | std.os.linux.IN.MOVED_TO) != 0) {
-                            fsm.whitelist_dirty = true;
-                        }
+                        fsm.notifyReload(.whitelist);
+                    }
+                } else if (ev.wd == (self.confdir_wd orelse -1) and write_or_move) {
+                    // 用户配置目录变化 (任意 .json, 如 config.json) → 热重载
+                    if (nameEndsWithJson(ev, data, off)) {
+                        fsm.notifyReload(.config);
                     }
                 }
                 // moddir 上的 disable/remove 变化不需要处理: tick 会全量重查
@@ -444,11 +499,28 @@ const EventSource = struct {
     }
 
     /// inotify 事件的 name 字段是否等于给定文件名
+
+    /// inotify 事件的 name 是否以 .json 结尾
+    fn nameEndsWithJson(ev: *const std.os.linux.inotify_event, data: []const u8, ev_off: usize) bool {
+        const name = eventName(ev, data, ev_off);
+        if (name.len < 5) return false;
+        return std.mem.eql(u8, name[name.len - 5 ..], ".json");
+    }
+
+    /// inotify 事件的 name 字段是否等于给定文件名
+    /// ⚠️ 实测本内核把 len 恒报为 16 (name 区域圆整到 16 字节), 必须用 NUL 截断解析
     fn nameIs(ev: *const std.os.linux.inotify_event, data: []const u8, ev_off: usize, want: []const u8) bool {
-        if (ev.len < 1 or ev.len - 1 != want.len) return false; // len 含结尾 NUL
-        const name_start = ev_off + @sizeOf(std.os.linux.inotify_event);
-        if (name_start + want.len > data.len) return false;
-        return std.mem.eql(u8, data[name_start .. name_start + want.len], want);
+        return std.mem.eql(u8, eventName(ev, data, ev_off), want);
+    }
+
+    /// 提取事件 name (到第一个 NUL 为止)
+    fn eventName(ev: *const std.os.linux.inotify_event, data: []const u8, ev_off: usize) []const u8 {
+        const start = ev_off + @sizeOf(std.os.linux.inotify_event);
+        const end = @min(start + ev.len, data.len);
+        if (start >= end) return "";
+        const region = data[start..end];
+        if (std.mem.indexOfScalar(u8, region, 0)) |nul| return region[0..nul];
+        return region;
     }
 };
 

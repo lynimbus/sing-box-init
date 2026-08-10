@@ -129,6 +129,20 @@ print("新白名单已生效 ✓:", ip)
 PY
 grep -q "sing-box started" "$T/data/logs/watchdog.log" && echo "看门狗日志有重启记录 ✓"
 
+echo "== 配置热重载 (改 conf.d/config.json, 无需手动重启) =="
+OLD_PID=$(cat "$T/data/sing-box.pid")
+sed -i 's/"hijack"/"fake-ip"/' "$T/data/conf.d/config.json"
+sleep 3   # 去抖 0.8s + 重启
+NEW_PID=$(cat "$T/data/sing-box.pid")
+[ "$OLD_PID" = "$NEW_PID" ] && { echo "FAIL: 配置热重载后 pid 未变"; exit 1; }
+kill -0 "$NEW_PID" 2>/dev/null || { echo "FAIL: 配置热重载后的 sing-box 未存活"; exit 1; }
+echo "配置热重载触发重启 ✓ (pid $OLD_PID → $NEW_PID)"
+grep -q "fake-ip" "$T/data/conf.d.generated/config.json" && echo "新配置已注入生成目录 ✓" || { echo "FAIL: 新配置未生效"; exit 1; }
+# 稳定性验证: 热重载后不再反复重启 (生成目录是 watch 盲区, 不会触发自身)
+sleep 4
+STABLE_PID=$(cat "$T/data/sing-box.pid")
+[ "$NEW_PID" = "$STABLE_PID" ] && echo "重启后保持稳定, 无重启循环 ✓" || { echo "FAIL: 出现重启循环 (pid 又变了)"; exit 1; }
+
 echo "== stop (卸载路径) =="
 SBX stop
 sleep 1
