@@ -5,13 +5,18 @@
   },
   "inbounds": [
     {
-      "type": "ebpf",
-      "tag": "ebpf-in",
-      "dns_mode": "hijack",
-      "redirect_address": [
-        "127.128.0.0/9",
-        "fd53:696e:672d:626f::/64"
-      ]
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun0",
+      "mtu": 9000,
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "system",
+      "sniff": true,
+      "sniff_override_destination": true
     }
   ],
   "outbounds": [

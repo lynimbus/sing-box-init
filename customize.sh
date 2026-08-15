@@ -40,16 +40,15 @@ chmod 0755 "$MODPATH"/*.sh 2>/dev/null
 
 # 初始化配置目录 (配置持久化在 /data/adb/sing-box, 不受模块更新/卸载影响)
 # 布局: conf.d/ 为 sing-box 配置目录 (-C 模式), 目录内 json 全部合并 (数组追加, 勿重复定义同 tag 的 inbound/outbound)
-#       默认示例配置 config.json 已含唯一 ebpf 入站, 加应用只改 include_package 纯文本文件
+#       默认示例配置 config.json 为 tun 全局代理, 加应用只改 include_package 纯文本文件
 DATA_DIR=/data/adb/sing-box
 mkdir -p "$DATA_DIR" "$DATA_DIR/logs" "$DATA_DIR/conf.d"
 
-# 旧版独立 ebpf 入站文件迁移: 新版默认 config.json 已含 ebpf 入站 (示例),
-# 仅当 conf.d/config.json 不存在 (将用新版示例) 时移除遗留的 bypass-apps.json, 避免两个 ebpf 入站打架
-# 用户已有自己的 config.json 时保留不动 (由用户自行决定去留)
-if [ ! -f "$DATA_DIR/conf.d/config.json" ] && [ -f "$DATA_DIR/conf.d/bypass-apps.json" ]; then
+# 旧版 ebpf 入站文件清理: 本版本已彻底移除 ebpf 支持 (默认改为 tun 全局代理),
+# 遗留的 bypass-apps.json 必然含 ebpf 入站, 保留会导致 sing-box 启动失败, 直接移除
+if [ -f "$DATA_DIR/conf.d/bypass-apps.json" ]; then
     rm -f "$DATA_DIR/conf.d/bypass-apps.json"
-    ui_print "[sing-box-init] 已清理旧版 bypass-apps.json (ebpf 入站已并入默认 config.json)"
+    ui_print "[sing-box-init] 已移除旧版 bypass-apps.json (ebpf 入站已废弃, 请改用 tun/路由规则)"
 fi
 
 if [ ! -f "$DATA_DIR/conf.d/config.json" ]; then
@@ -64,10 +63,8 @@ else
     ui_print "[sing-box-init] 检测到已有配置, 保留: $DATA_DIR/conf.d/config.json"
 fi
 
-# ebpf 入站已包含在默认 config.json 示例中 (静态参数; include_package 由 daemon.sh 启动时注入), 不再有独立 bypass-apps.json
-
 # 应用白名单文件 (纯文本, 每行一个包名 = 走代理的应用; 空行/# 注释忽略), 仅不存在时复制, 不覆盖用户改动
-# daemon.sh 启动时读取并注入正式配置 (ebpf 入站 -> include_package, 非 ebpf -> 路由规则)
+# daemon.sh 启动时读取白名单并生成路由规则 (package_name + action: route, 列出的应用走代理)
 # 若用户已把 include_package 改名成 include_package.disable (关闭白名单), 更新/重装模块时也不重新生成, 保持禁用状态
 if [ ! -f "$DATA_DIR/include_package" ] && [ ! -f "$DATA_DIR/include_package.disable" ]; then
     cp -f "$MODPATH/config/include_package" "$DATA_DIR/include_package"

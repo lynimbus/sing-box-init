@@ -41,7 +41,7 @@ cat > "$T/data/conf.d/config.json" <<'EOF'
 {
   "log": { "level": "info", "timestamp": true },
   "inbounds": [
-    { "type": "ebpf", "tag": "ebpf-in", "dns_mode": "hijack" }
+    { "type": "tun", "tag": "tun-in", "auto_route": true, "stack": "system" }
   ],
   "outbounds": [ { "type": "direct", "tag": "direct" } ]
 }
@@ -69,14 +69,23 @@ echo "看门狗 pid: $WPID, sing-box(stub) pid: $SPID"
 kill -0 "$WPID" 2>/dev/null && echo "看门狗进程存活 ✓" || { echo "FAIL: 看门狗已死"; exit 1; }
 kill -0 "$SPID" 2>/dev/null && echo "sing-box(stub) 进程存活 ✓" || { echo "FAIL: sing-box 已死"; exit 1; }
 
-echo "== 白名单注入验证 =="
-GEN="$T/data/conf.d.generated/config.json"
-python3 - "$GEN" <<'PY'
+echo "== 白名单路由规则验证 =="
+GEN_RULES="$T/data/conf.d.generated/00-include-package.json"
+python3 - "$GEN_RULES" <<'PY'
+import json, sys
+rules = json.load(open(sys.argv[1]))
+rule = rules["route"]["rules"][0]
+assert rule["action"] == "route", f"action 错误: {rule}"
+pkgs = rule["package_name"]
+assert pkgs == ["com.example.app1", "com.example.app2"], f"路由规则错误: {pkgs}"
+print("路由规则已生成 ✓:", pkgs)
+PY
+# 原配置保持原样 (不再注入 ebpf 字段)
+python3 - "$T/data/conf.d.generated/config.json" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
-ip = cfg["inbounds"][0].get("include_package")
-assert ip == ["com.example.app1", "com.example.app2"], f"注入失败: {ip}"
-print("include_package 已注入 ✓:", ip)
+assert "include_package" not in json.dumps(cfg), "配置不应被改写"
+print("原配置保持原样 ✓ (无 include_package 注入)")
 PY
 
 echo "== 看门狗日志 =="
@@ -120,24 +129,25 @@ NEW_PID=$(cat "$T/data/sing-box.pid")
 [ "$OLD_PID" = "$NEW_PID" ] && { echo "FAIL: 热重载后 pid 未变 (sing-box 未重启)"; exit 1; }
 kill -0 "$NEW_PID" 2>/dev/null || { echo "FAIL: 热重载后的 sing-box 未存活"; exit 1; }
 echo "热重载触发重启 ✓ (pid $OLD_PID → $NEW_PID)"
-python3 - "$T/data/conf.d.generated/config.json" <<'PY'
+python3 - "$T/data/conf.d.generated/00-include-package.json" <<'PY'
 import json, sys
-cfg = json.load(open(sys.argv[1]))
-ip = cfg["inbounds"][0].get("include_package")
-assert ip == ["com.example.app1", "com.example.app3"], f"热重载注入失败: {ip}"
-print("新白名单已生效 ✓:", ip)
+rules = json.load(open(sys.argv[1]))
+rule = rules["route"]["rules"][0]
+pkgs = rule["package_name"]
+assert pkgs == ["com.example.app1", "com.example.app3"], f"热重载路由规则错误: {pkgs}"
+print("新白名单已生效 ✓:", pkgs)
 PY
 grep -q "sing-box started" "$T/data/logs/watchdog.log" && echo "看门狗日志有重启记录 ✓"
 
 echo "== 配置热重载 (改 conf.d/config.json, 无需手动重启) =="
 OLD_PID=$(cat "$T/data/sing-box.pid")
-sed -i 's/"hijack"/"fake-ip"/' "$T/data/conf.d/config.json"
+sed -i 's/"stack": "system"/"stack": "gvisor"/' "$T/data/conf.d/config.json"
 sleep 3   # 去抖 0.8s + 重启
 NEW_PID=$(cat "$T/data/sing-box.pid")
 [ "$OLD_PID" = "$NEW_PID" ] && { echo "FAIL: 配置热重载后 pid 未变"; exit 1; }
 kill -0 "$NEW_PID" 2>/dev/null || { echo "FAIL: 配置热重载后的 sing-box 未存活"; exit 1; }
 echo "配置热重载触发重启 ✓ (pid $OLD_PID → $NEW_PID)"
-grep -q "fake-ip" "$T/data/conf.d.generated/config.json" && echo "新配置已注入生成目录 ✓" || { echo "FAIL: 新配置未生效"; exit 1; }
+grep -q "gvisor" "$T/data/conf.d.generated/config.json" && echo "新配置已注入生成目录 ✓" || { echo "FAIL: 新配置未生效"; exit 1; }
 # 稳定性验证: 热重载后不再反复重启 (生成目录是 watch 盲区, 不会触发自身)
 sleep 4
 STABLE_PID=$(cat "$T/data/sing-box.pid")

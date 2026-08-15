@@ -27,21 +27,20 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 - `build.sh` — 构建：`zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall` → 复制二进制到 `bin/` → zip 打包
 - `test_local.sh` — 本机端到端测试（stub sing-box，全生命周期验证）
 - `bin/` — 随模块附带的 sing-box arm64 tar.gz（**被 .gitignore 忽略但打包必须包含**）+ 构建时生成的 `sing-box-init` 二进制（也是 gitignored）。customize.sh 安装时解压出 `bin/sing-box`（约 94MB）
-- `config/config.json` — **默认示例配置**（含唯一 ebpf 入站 + 最小 direct 出站 + geoip-cn-nodoh 规则集）。⚠️ **合并语义**：数组追加、对象递归合并——conf.d 下其他文件不要再定义 ebpf/其他 inbound/outbound 数组（会 duplicate tag 冲突）；设备上遗留的旧版 `conf.d/bypass-apps.json` 应删掉（customize.sh 只在 conf.d/config.json 不存在时自动清理）
-- `config/include_package` — **应用白名单（纯文本，用户唯一要编辑的文件）**：每行一个包名（空行、`#` 注释忽略），列出的应用走代理，其余（ebpf 模式）内核层绕过。⚠️ 包名只在启动时解析，改后需重启（Action 按钮）；清空文件 = 全部应用走代理。**开关：改名成 `include_package.disable` 即关闭白名单**（两者都存在时以 `include_package` 为准；已禁用状态下更新/重装不会重新生成）
+- `config/config.json` — **默认示例配置**（tun 全局代理入站 + 最小 direct 出站）。⚠️ **合并语义**：数组追加、对象递归合并——conf.d 下其他文件不要再定义同 tag 的 inbound/outbound 数组（会 duplicate tag 冲突）；设备上遗留的旧版 `conf.d/bypass-apps.json`（ebpf 入站，已废弃）由 customize.sh 安装时直接移除
+- `config/include_package` — **应用白名单（纯文本，用户唯一要编辑的文件）**：每行一个包名（空行、`#` 注释忽略），列出的应用走代理，其余流量直连绕过。⚠️ 包名只在启动时解析，改后需重启（Action 按钮）；清空文件 = 全部应用走代理。**开关：改名成 `include_package.disable` 即关闭白名单**（两者都存在时以 `include_package` 为准；已禁用状态下更新/重装不会重新生成）
 - `webroot/` — KernelSU WebUI 入口（index.html + icon.png）。加载即跳外部浏览器打开 dashboard
 
 ## Zig 版白名单生成（whitelist.zig，替代旧 shell 版）
 
-旧版用 awk 做文本注入（容忍非严格 JSON）；新版用 `std.json` **严格解析**，流程（对应旧 whitelist.sh）：
+旧版用 awk 做文本注入（容忍非严格 JSON）；新版流程（对应旧 whitelist.sh），**不再解析/改写用户配置**（旧版为注入 ebpf 入站才需要解析 JSON）：
 
 1. 重建生成目录 `conf.d.generated/`：清旧 json → 复制 `conf.d/` 下所有 `*.json`
 2. `include_package` 不存在（或改名 `.disable`）→ 白名单关闭，配置原样加载
 3. 过滤白名单文件（空行/`#` 注释/首尾空白/`\r`）
-4. 递归找每个文件里 `type == "ebpf"` 的对象（任意深度），`include_package` 整体替换/插入；含 ebpf 的文件重新序列化（缩进 2 空格，便于排查），其余保持原样
-5. 所有文件都无 ebpf（如 tun 模式）→ 写路由规则 `00-include-package.json`（`package_name` + `action: route`）
+4. 白名单非空 → 写路由规则 `00-include-package.json`（`package_name` + `action: route`，列出的应用走 final 代理）
 
-**严格语义（2026-08-11 定案）**：任一配置文件非法 JSON → 生成失败，daemon 回退直接用原始 conf.d（sing-box 报真实错误，watchdog.log 里先给出明确提示）。用户配置写不合法，sing-box 反正起不来，不静默放过。
+配置是否合法由 sing-box 自己报错（不再因非法 JSON 生成失败）。
 
 ## 关键约束（易踩坑）
 
@@ -93,7 +92,7 @@ KernelSU (兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运
 - `ksud module action sing-box-init` 模拟 Action 按钮（现在只做重启）；`ksud module list` 确认描述最终值。
 - 验证模块开关：`ksud module disable sing-box-init` 后 `ls /data/adb/modules/sing-box-init/disable` 应存在、`ss -ltn | grep 1235` 应消失（约 3 秒内）；`ksud module enable sing-box-init` 后约 3 秒内恢复监听。
 - 核心端口验证：`su -c 'ss -ltn | grep 1235'`、`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:1235/dashboard/`。
-- 白名单验证：改 `/data/adb/sing-box/include_package` → Action 重启 → 看 `/data/adb/sing-box/conf.d.generated/` 下对应文件的 `include_package`（ebpf 注入）或 `00-include-package.json`（路由规则）；`su -c 'grep -A3 include_package /data/adb/sing-box/conf.d.generated/config.json'`。
+- 白名单验证：改 `/data/adb/sing-box/include_package` → Action 重启 → 看 `/data/adb/sing-box/conf.d.generated/00-include-package.json` 的 `package_name` 数组（路由规则）；`su -c 'grep -A3 package_name /data/adb/sing-box/conf.d.generated/00-include-package.json'`。
 - 白名单开关验证：`su -c 'mv /data/adb/sing-box/include_package /data/adb/sing-box/include_package.disable'` → Action 重启 → `conf.d.generated/` 应与 conf.d 完全一致，`logs/watchdog.log` 有 `whitelist disabled` 记录；`mv` 回去即恢复。
 - 设备上无 wget（toybox 没编译），用 curl（/system/bin/curl 存在）。
 - 安装/卸载产物验证看 `ls $MODDIR/bin` 与 `/data/adb/sing-box/` 是否存在。
