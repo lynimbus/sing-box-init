@@ -67,7 +67,7 @@ fi
 # ebpf 入站已包含在默认 config.json 示例中 (静态参数; include_package 由 daemon.sh 启动时注入), 不再有独立 bypass-apps.json
 
 # 应用白名单文件 (纯文本, 每行一个包名 = 走代理的应用; 空行/# 注释忽略), 仅不存在时复制, 不覆盖用户改动
-# daemon.sh 启动时读取并注入正式配置 (ebpf 入站 -> include_package, 非 ebpf -> 路由规则)
+# daemon.sh 启动时读取并注入正式配置 (ebpf 入站 -> local.include_package, 非 ebpf -> 路由规则)
 # 若用户已把 include_package 改名成 include_package.disable (关闭白名单), 更新/重装模块时也不重新生成, 保持禁用状态
 if [ ! -f "$DATA_DIR/include_package" ] && [ ! -f "$DATA_DIR/include_package.disable" ]; then
     cp -f "$MODPATH/config/include_package" "$DATA_DIR/include_package"

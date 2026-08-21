@@ -74,7 +74,7 @@ GEN="$T/data/conf.d.generated/config.json"
 python3 - "$GEN" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
-ip = cfg["inbounds"][0].get("include_package")
+ip = cfg["inbounds"][0]["local"].get("include_package")
 assert ip == ["com.example.app1", "com.example.app2"], f"注入失败: {ip}"
 print("include_package 已注入 ✓:", ip)
 PY
@@ -123,7 +123,7 @@ echo "热重载触发重启 ✓ (pid $OLD_PID → $NEW_PID)"
 python3 - "$T/data/conf.d.generated/config.json" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
-ip = cfg["inbounds"][0].get("include_package")
+ip = cfg["inbounds"][0]["local"].get("include_package")
 assert ip == ["com.example.app1", "com.example.app3"], f"热重载注入失败: {ip}"
 print("新白名单已生效 ✓:", ip)
 PY

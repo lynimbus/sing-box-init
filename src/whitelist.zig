@@ -9,7 +9,11 @@
 //!   2. include_package 不存在 (或已改名 .disable) → 白名单关闭, 配置原样加载
 //!   3. 过滤白名单文件: 空行 / `#` 注释 / 首尾空白与 \r 忽略
 //!   4. 递归找每个文件里的 ebpf 入站 (任意深度的 type == "ebpf" 对象),
-//!      把 include_package 整体替换为白名单 (已有则替换, 没有则插入)
+//!      把白名单写入 local.include_package (新核心结构: include_package 在
+//!      local 子对象下; 无 local 则创建)。顺带迁移旧版配置字段:
+//!         - 顶层 include_package (1.14 前格式) → 移除
+//!         - redirect_address → 移除 (新核心自动分配重定向前缀)
+//!      两者在新核心下都会被 DisallowUnknownFields 拒绝 (未知字段直接报错)
 //!   5. 所有文件都没有 ebpf 入站 (如 tun 模式) → 写路由规则 00-include-package.json
 //!      (package_name 白名单 + action: route, 列出的应用走 final 代理)
 //!
@@ -58,8 +62,8 @@ pub fn run(ctx: *Context) bool {
             ctx.log("ERROR", "白名单生成失败: 配置文件不是合法 JSON: {s} (请检查格式)", .{path});
             return false;
         };
-        // 递归注入 include_package; 含 ebpf 入站的文件重新序列化
-        if (injectEbpfObjects(a, &parsed, pkgs)) {
+        // 递归注入白名单 (local.include_package) + 迁移旧字段; 含 ebpf 入站的文件重新序列化
+        if (injectEbpfObjects(ctx, a, &parsed, pkgs)) {
             found_ebpf = true;
             writeJsonFile(ctx, a, path, parsed);
         }
@@ -107,29 +111,52 @@ fn readPkgs(ctx: *Context, a: std.mem.Allocator) ?[][]const u8 {
     return list.toOwnedSlice(a) catch return null;
 }
 
-/// 递归遍历 JSON, 给每个 type == "ebpf" 的对象注入 include_package (已有则整体替换)
+/// 递归遍历 JSON, 给每个 type == "ebpf" 的对象注入白名单:
+///   - 写入 local.include_package (自 sing-box 1.14 起 include_package 位于 local 子对象下;
+///     无 local 则创建, 已有则只更新该字段)
+///   - 顺带迁移旧版字段: 顶层 include_package 与 redirect_address 在新核心下会被
+///     DisallowUnknownFields 拒绝 (未知字段直接报错), 必须移除 (记日志便于排查)
 /// 返回是否找到至少一个 ebpf 对象
-fn injectEbpfObjects(a: std.mem.Allocator, value: *std.json.Value, pkgs: []const []const u8) bool {
+fn injectEbpfObjects(ctx: *Context, a: std.mem.Allocator, value: *std.json.Value, pkgs: []const []const u8) bool {
     var found = false;
     switch (value.*) {
         .object => |*obj| {
             if (isEbpf(obj.*)) {
                 found = true;
-                obj.put(a, "include_package", whitelistArray(a, pkgs)) catch {};
+                // 旧版顶层 include_package (1.14 前格式) → 移除 (新核心拒绝未知字段)
+                if (obj.orderedRemove("include_package")) {
+                    ctx.log("INFO", "迁移: 移除 ebpf 顶层 include_package (新核心要求写入 local.include_package)", .{});
+                }
+                // 旧版 redirect_address → 移除 (新核心自动分配重定向前缀, 保留会报错)
+                if (obj.orderedRemove("redirect_address")) {
+                    ctx.log("INFO", "迁移: 移除过时的 redirect_address (新核心自动分配重定向前缀)", .{});
+                }
+                // 白名单写入 local.include_package
+                const local = getOrCreateObject(a, obj, "local");
+                local.put(a, "include_package", whitelistArray(a, pkgs)) catch {};
             }
             var it = obj.iterator();
             while (it.next()) |entry| {
-                if (injectEbpfObjects(a, entry.value_ptr, pkgs)) found = true;
+                if (injectEbpfObjects(ctx, a, entry.value_ptr, pkgs)) found = true;
             }
         },
         .array => |arr| {
             for (arr.items) |*item| {
-                if (injectEbpfObjects(a, item, pkgs)) found = true;
+                if (injectEbpfObjects(ctx, a, item, pkgs)) found = true;
             }
         },
         else => {},
     }
     return found;
+}
+
+/// 取对象里的子对象; 不存在 (或类型不是对象) 时创建空对象并返回
+fn getOrCreateObject(a: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8) *std.json.ObjectMap {
+    if (obj.getPtr(key)) |v| {
+        if (v.* == .object) return &v.*.object;
+    }
+    obj.put(a, key, .{ .object = .empty }) catch {};
+    return &obj.getPtr(key).?.object;
 }
 
 /// 判断对象是否是 ebpf 入站: 有 "type": "ebpf"

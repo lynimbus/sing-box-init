@@ -7,11 +7,8 @@
     {
       "type": "ebpf",
       "tag": "ebpf-in",
-      "dns_mode": "hijack",
-      "redirect_address": [
-        "127.128.0.0/9",
-        "fd53:696e:672d:626f::/64"
-      ]
+      "mode": "local",
+      "dns_mode": "hijack"
     }
   ],
   "outbounds": [

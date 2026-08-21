@@ -95,7 +95,7 @@ test "ebpf 配置: 注入 include_package, 无 ebpf 的文件保持原样" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
     defer parsed.deinit();
     const inbounds = parsed.value.object.get("inbounds").?.array;
-    const ip = inbounds.items[0].object.get("include_package").?.array;
+    const ip = inbounds.items[0].object.get("local").?.object.get("include_package").?.array;
     try std.testing.expectEqual(@as(usize, 2), ip.items.len);
     try std.testing.expectEqualSlices(u8, "com.example.a", ip.items[0].string);
     try std.testing.expectEqualSlices(u8, "com.example.b", ip.items[1].string);
@@ -110,11 +110,11 @@ test "ebpf 配置: 注入 include_package, 无 ebpf 的文件保持原样" {
     try std.testing.expect(!context.fileExistsAt(env.io, rules_path));
 }
 
-test "已有 include_package: 整体替换" {
+test "已有 local.include_package: 整体替换" {
     var env = try TestEnv.init(std.testing.allocator);
     defer env.deinit();
     try env.writeConf("config.json",
-        \\{ "inbounds": [ { "type": "ebpf", "include_package": ["old.pkg"] } ] }
+        \\{ "inbounds": [ { "type": "ebpf", "local": { "include_package": ["old.pkg"] } } ] }
     );
     try env.writePkgs("new.pkg\n");
 
@@ -123,7 +123,7 @@ test "已有 include_package: 整体替换" {
     defer env.gpa.free(out);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
     defer parsed.deinit();
-    const ip = parsed.value.object.get("inbounds").?.array.items[0].object.get("include_package").?.array;
+    const ip = parsed.value.object.get("inbounds").?.array.items[0].object.get("local").?.object.get("include_package").?.array;
     try std.testing.expectEqual(@as(usize, 1), ip.items.len);
     try std.testing.expectEqualSlices(u8, "new.pkg", ip.items[0].string);
 }
@@ -174,7 +174,7 @@ test "白名单过滤: 注释 / 空行 / CR / 首尾空白" {
     defer env.gpa.free(out);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
     defer parsed.deinit();
-    const ip = parsed.value.object.get("inbounds").?.array.items[0].object.get("include_package").?.array;
+    const ip = parsed.value.object.get("inbounds").?.array.items[0].object.get("local").?.object.get("include_package").?.array;
     try std.testing.expectEqual(@as(usize, 3), ip.items.len);
     try std.testing.expectEqualSlices(u8, "com.example.a", ip.items[0].string);
     try std.testing.expectEqualSlices(u8, "com.example.b", ip.items[1].string);
@@ -217,8 +217,52 @@ test "多 ebpf 入站: 全部注入" {
     defer parsed.deinit();
     const inbounds = parsed.value.object.get("inbounds").?.array;
     for (inbounds.items) |item| {
-        try std.testing.expectEqualSlices(u8, "com.example.a", item.object.get("include_package").?.array.items[0].string);
+        try std.testing.expectEqualSlices(u8, "com.example.a", item.object.get("local").?.object.get("include_package").?.array.items[0].string);
     }
+}
+
+test "旧格式迁移: 顶层 include_package 与 redirect_address 被移除, 白名单写入 local" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json",
+        \\{ "inbounds": [ { "type": "ebpf", "tag": "in", "redirect_address": ["127.128.0.0/9"], "include_package": ["old.pkg"] } ] }
+    );
+    try env.writePkgs("new.pkg\n");
+
+    try std.testing.expect(whitelist.run(&env.ctx));
+    const out = try env.readGen("config.json");
+    defer env.gpa.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    const inbound = parsed.value.object.get("inbounds").?.array.items[0].object;
+    // 旧字段必须被移除 (新核心 DisallowUnknownFields 会拒绝)
+    try std.testing.expect(inbound.get("redirect_address") == null);
+    try std.testing.expect(inbound.get("include_package") == null);
+    // 白名单写入 local.include_package
+    const ip = inbound.get("local").?.object.get("include_package").?.array;
+    try std.testing.expectEqual(@as(usize, 1), ip.items.len);
+    try std.testing.expectEqualSlices(u8, "new.pkg", ip.items[0].string);
+}
+
+test "已有 local 对象: 保留其他字段, 只更新 include_package" {
+    var env = try TestEnv.init(std.testing.allocator);
+    defer env.deinit();
+    try env.writeConf("config.json",
+        \\{ "inbounds": [ { "type": "ebpf", "tag": "in", "local": { "cgroup_path": "/sys/fs/cgroup/test", "exclude_package": ["keep.me"] } } ] }
+    );
+    try env.writePkgs("com.example.a\n");
+
+    try std.testing.expect(whitelist.run(&env.ctx));
+    const out = try env.readGen("config.json");
+    defer env.gpa.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    const local = parsed.value.object.get("inbounds").?.array.items[0].object.get("local").?.object;
+    // 其他字段保留
+    try std.testing.expectEqualSlices(u8, "/sys/fs/cgroup/test", local.get("cgroup_path").?.string);
+    try std.testing.expectEqualSlices(u8, "keep.me", local.get("exclude_package").?.array.items[0].string);
+    // include_package 更新为白名单
+    try std.testing.expectEqualSlices(u8, "com.example.a", local.get("include_package").?.array.items[0].string);
 }
 
 test "多文件: 一个含 ebpf, 一个不含 → 只注入前者, 不写路由规则" {
