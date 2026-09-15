@@ -1,0 +1,423 @@
+name: Update sing-box Core
+
+# 每天检查一次: sing-box 核心有新版 或 项目文件有改动 → 跑测试 → 构建模块 zip → 发 release。
+# 构建/检查失败会自动开/更新一个 issue, 下次成功时自动关闭 (以前静默变红, 整条链路死了 10 天没人发现)。
+#
+# 设计要点 (都是踩过的坑, 改前先读):
+#   1. 所有 GitHub API 走 `gh api` (带 token): 匿名 curl 每 IP 每小时 60 次, CI 共享出口很容易被限流,
+#      限流后 jq 解析出 null 会把 version 写成 "null"。
+#   2. 每个 run 块都 `set -euo pipefail`, 关键变量取值后立刻校验非空/合法, 宁可红叉也不发坏包。
+#   3. 外部输入 (版本号/资产名/tag) 一律通过 env 传给 shell, 不直接 ${{ }} 插值进脚本, 避免注入与引号问题。
+#   4. 判断 tar 内容不要写 `tar -tzf x | grep -q ...`: grep -q 命中即退出, tar 写管道收到 EPIPE 退出码非 0,
+#      pipefail 把整条管道判为失败 → 假阴性。曾因此让自动更新静默死掉 10 天。先落盘成变量再 grep。
+#   5. 顺序是 构建 → 提交推送 → 发 release: 先推再打 tag, tag 才能指向包含新版本号的提交。
+#      构建失败就不会有孤立 tag/release; push 失败直接失败退出, 不发 release (下次重跑仍是同一 versionCode)。
+#   6. release 步骤幂等: tag 已存在 (上次跑到一半) 时改为覆盖上传资产, 不会因 "already exists" 失败。
+#   7. 核心取版优先 prerelease: 本模块依赖 reF1nd 分支的 eBPF 实现 (热点流量劫持), 新特性只在预发布里。
+#   8. 构建入口只有 build.sh 一个 (本地与 CI 共用), 不在 workflow 里重写一套编译逻辑。
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制构建 (忽略"无更新"判断)'
+        type: boolean
+        default: false
+
+# 同一分支只允许一个实例: 两个实例同时算 versionCode / push 会互相冲突
+concurrency:
+  group: update-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # sing-box 核心来源 (reF1nd 分支: 带 eBPF 入站的那份)
+  CORE_REPO: reF1nd/sing-box-releases
+
+jobs:
+  check:
+    name: 检查更新
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      version: ${{ steps.check.outputs.version }}
+      core_tag: ${{ steps.check.outputs.core_tag }}
+      core_updated: ${{ steps.check.outputs.core_updated }}
+      asset_name: ${{ steps.check.outputs.asset_name }}
+      asset_url: ${{ steps.check.outputs.asset_url }}
+      last_tag: ${{ steps.check.outputs.last_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 检查 sing-box 核心与项目更新
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # ---- sing-box 核心版本 (优先 prerelease/testing, 没有则取最新正式版) ----
+          RELEASES=$(gh api "repos/${CORE_REPO}/releases?per_page=30")
+          RELEASE_JSON=$(jq -c '
+            [.[] | select(.draft == false)] as $all
+            | (($all | map(select(.prerelease)) | first) // ($all | first))
+            // empty' <<<"$RELEASES")
+          if [ -z "$RELEASE_JSON" ]; then
+            echo "::error::未从 ${CORE_REPO} 取到可用 release"
+            exit 1
+          fi
+
+          CORE_TAG=$(jq -r '.tag_name // empty' <<<"$RELEASE_JSON")
+          [ -n "$CORE_TAG" ] || { echo "::error::release 缺少 tag_name"; exit 1; }
+          VERSION=$(sed 's/^v//; s/-reF1nd$//' <<<"$CORE_TAG")
+          # 版本号必须形如 1.14.0 / 1.14.0-rc.4, 否则后面 versionCode 与 zip 名都会算错
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::解析出的版本号不合法: '${VERSION}' (tag: ${CORE_TAG})"
+            exit 1
+          fi
+
+          CURRENT=$(sed -n 's/^version=//p' module.prop | head -n1)
+          [ -n "$CURRENT" ] || { echo "::error::module.prop 缺少 version"; exit 1; }
+          echo "当前版本: $CURRENT"
+          echo "最新版本: $VERSION (tag: $CORE_TAG)"
+
+          CORE_UPDATED=false
+          if [ "$CURRENT" != "$VERSION" ]; then
+            CORE_UPDATED=true
+          fi
+
+          # ---- arm64 核心资产 ----
+          ASSET=$(jq -c '
+            [.assets[] | select(.name | test("^sing-box-.*-android-arm64\\.tar\\.gz$"))] | first
+            // empty' <<<"$RELEASE_JSON")
+          if [ -z "$ASSET" ]; then
+            echo "::error::${CORE_TAG} 里没有 android-arm64 tar.gz 资产, 现有资产:"
+            jq -r '.assets[].name' <<<"$RELEASE_JSON" | sed 's/^/  /'
+            exit 1
+          fi
+          ASSET_NAME=$(jq -r '.name' <<<"$ASSET")
+          ASSET_URL=$(jq -r '.browser_download_url' <<<"$ASSET")
+
+          # ---- 项目文件是否有更新 (自上次 release 以来) ----
+          # 排除工作流自身维护的文件, 否则工作流自己的提交会再次触发构建, 每天空转发版。
+          LAST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=1" --jq '.[0].tag_name // empty' || true)
+          CHANGED=""
+          PROJECT_UPDATED=false
+          if [ -z "$LAST_TAG" ]; then
+            echo "还没有任何 release, 需要构建"
+            PROJECT_UPDATED=true
+          elif CHANGED=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${LAST_TAG}...${GITHUB_SHA}" \
+                          --jq '[.files[]?.filename] | join("\n")'); then
+            CHANGED=$(grep -vE '^(\.github/|module\.prop|update\.json|changelog\.md|README|LICENSE|\.gitignore)' <<<"$CHANGED" || true)
+            if [ -n "$CHANGED" ]; then
+              PROJECT_UPDATED=true
+              echo "项目文件变更 (${LAST_TAG}...${GITHUB_SHA}):"
+              awk '{print "  " $0}' <<<"$CHANGED"
+            fi
+          else
+            # compare API 失败 (如 tag 被强制推送重写): 保守起见视为有更新
+            echo "::warning::compare API 失败 (${LAST_TAG}...${GITHUB_SHA}), 视为有更新"
+            PROJECT_UPDATED=true
+          fi
+
+          SKIP=true
+          if [ "$CORE_UPDATED" = true ] || [ "$PROJECT_UPDATED" = true ]; then
+            SKIP=false
+          elif [ "${FORCE:-false}" = true ]; then
+            echo "手动强制构建"
+            SKIP=false
+          else
+            echo "sing-box 核心无新版且项目无变更, 跳过"
+          fi
+
+          {
+            echo "skip=$SKIP"
+            echo "version=$VERSION"
+            echo "core_tag=$CORE_TAG"
+            echo "core_updated=$CORE_UPDATED"
+            echo "asset_name=$ASSET_NAME"
+            echo "asset_url=$ASSET_URL"
+            echo "last_tag=$LAST_TAG"
+            echo "changed_files<<EOF"
+            printf '%s\n' "$CHANGED" | head -20
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 构建并发布
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      CORE_TAG: ${{ needs.check.outputs.core_tag }}
+      CORE_UPDATED: ${{ needs.check.outputs.core_updated }}
+      ASSET_NAME: ${{ needs.check.outputs.asset_name }}
+      ASSET_URL: ${{ needs.check.outputs.asset_url }}
+      LAST_TAG: ${{ needs.check.outputs.last_tag }}
+      CHANGED_FILES: ${{ needs.check.outputs.changed_files }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # push 冲突时要 rebase, 需要完整历史
+          fetch-depth: 0
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 单元测试 (纯逻辑)
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test ./...
+
+      - name: 端到端测试 (stub 内核, 含故障注入)
+        run: |
+          set -euo pipefail
+          sh test_local.sh
+
+      - name: 下载 sing-box 核心 (arm64)
+        # bin/ 被 .gitignore 忽略, checkout 里没有, 每次构建都必须重新下载
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          rm -f bin/sing-box-*.tar.gz
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "bin/${ASSET_NAME}" "$ASSET_URL"
+          # 校验确实是含 sing-box 可执行文件的 tar.gz (customize.sh 靠它解压)。
+          # 先落盘成变量再 grep: 见文件头第 4 条。
+          TAR_LIST=$(tar -tzf "bin/${ASSET_NAME}")
+          if ! grep -qE '(^|/)sing-box$' <<<"$TAR_LIST"; then
+            echo "::error::${ASSET_NAME} 内未找到 sing-box 可执行文件, 内容:"
+            head -20 <<<"$TAR_LIST" | sed 's/^/  /'
+            exit 1
+          fi
+          echo "已下载: ${ASSET_NAME} ($(du -h "bin/${ASSET_NAME}" | cut -f1))"
+
+      - name: 计算 versionCode 与 release tag
+        id: version
+        run: |
+          set -euo pipefail
+          MAJOR=$(cut -d. -f1 <<<"$VERSION")
+          MINOR=$(cut -d. -f2 <<<"$VERSION")
+          LAST_NUM=$(grep -oE '[0-9]+$' <<<"$VERSION" || echo 0)
+          # 10# 强制十进制: "08" 这类前导零在 $(( )) 里会被当八进制而报错
+          COMPUTED=$((10#$MAJOR * 10000 + 10#$MINOR * 100 + 10#$LAST_NUM))
+          PREV=$(sed -n 's/^versionCode=//p' module.prop | head -n1)
+          PREV=${PREV:-0}
+          # 保证单调递增: 取 核心计算值 与 上一次 versionCode + 1 的较大者,
+          # 纯项目更新时 versionCode 只 +1, 核心版本回退 (如 rc 转正式) 也不倒退
+          if [ "$COMPUTED" -le "$PREV" ]; then
+            VERSION_CODE=$((PREV + 1))
+          else
+            VERSION_CODE=$COMPUTED
+          fi
+
+          if [ "$CORE_UPDATED" = true ]; then
+            # 核心更新: tag 用 v{version}
+            REL_TAG="v${VERSION}"
+            REL_TITLE="v${VERSION}"
+            REL_NOTES="sing-box 核心更新至 ${CORE_TAG}"
+          else
+            # 纯项目更新: tag 用 v{version}-r{versionCode}, 避免与已有 v{version} 冲突
+            REL_TAG="v${VERSION}-r${VERSION_CODE}"
+            REL_TITLE="v${VERSION} (build ${VERSION_CODE})"
+            REL_NOTES="模块脚本/配置更新 (sing-box 核心未变, ${CORE_TAG})"
+          fi
+          echo "versionCode: ${PREV} → ${VERSION_CODE}; release tag: ${REL_TAG}"
+
+          {
+            echo "version_code=$VERSION_CODE"
+            echo "rel_tag=$REL_TAG"
+            echo "rel_title=$REL_TITLE"
+            echo "rel_notes=$REL_NOTES"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 更新 module.prop / update.json / changelog.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          REL_TAG: ${{ steps.version.outputs.rel_tag }}
+        run: |
+          set -euo pipefail
+          # updateJson / changelog 的 raw URL 跟随实际分支, 不写死 main (本仓库分支是 ref1nd)
+          BRANCH=${GITHUB_REF_NAME:?}
+
+          sed -i "s|^version=.*|version=${VERSION}|" module.prop
+          sed -i "s|^versionCode=.*|versionCode=${VERSION_CODE}|" module.prop
+          sed -i "s|^updateJson=.*|updateJson=https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRANCH}/update.json|" module.prop
+
+          # 用 jq 生成 update.json, 不手拼字符串 (自动转义, 且保证是合法 JSON)
+          jq -n \
+            --arg version "v${VERSION}" \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg zipUrl "https://github.com/${GITHUB_REPOSITORY}/releases/download/${REL_TAG}/sing-box-init-v${VERSION}.zip" \
+            --arg changelog "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRANCH}/changelog.md" \
+            '{version: $version, versionCode: $versionCode, zipUrl: $zipUrl, changelog: $changelog}' \
+            > update.json
+
+          # 生成可读的 changelog.md 供 Manager 更新弹窗显示。
+          # 不能直接指向 GitHub release 页面 (HTML), 否则弹窗里会显示成一堆代码。
+          # 核心 release body 拉不到时降级为只写标题 + 发布页链接, 不让整个构建失败。
+          BODY=$(gh api "repos/${CORE_REPO}/releases/tags/${CORE_TAG}" --jq '.body // ""' || true)
+          {
+            echo "## sing-box 核心更新至 ${VERSION}"
+            echo ""
+            if [ -n "$BODY" ]; then
+              printf '%s\n\n' "$BODY"
+            fi
+            echo "> 发布页: https://github.com/${CORE_REPO}/releases/tag/${CORE_TAG}"
+            if [ -n "${CHANGED_FILES:-}" ]; then
+              echo ""
+              echo "## 模块变更"
+              echo ""
+              printf '%s\n' "$CHANGED_FILES" | awk 'NF {print "- " $0}'
+            fi
+          } > changelog.md
+
+          echo "--- module.prop"; cat module.prop
+          echo "--- update.json"; cat update.json
+
+      - name: 构建模块 zip
+        run: |
+          set -euo pipefail
+          sh build.sh
+
+      - name: 校验构建产物
+        run: |
+          set -euo pipefail
+          ZIP="sing-box-init-v${VERSION}.zip"
+          [ -s "$ZIP" ] || { echo "::error::未生成 $ZIP"; exit 1; }
+
+          # 守护进程二进制必须是 aarch64 (ELF64 + e_machine=0xb7): 打包错架构真机直接跑不起来
+          ELF=$(od -An -tx1 -N 20 bin/sing-box-init | tr -d ' \n')
+          case "$ELF" in
+            7f454c4602*) : ;;
+            *) echo "::error::bin/sing-box-init 不是 64 位 ELF (magic: ${ELF})"; exit 1 ;;
+          esac
+          if [ "${ELF:36:4}" != "b700" ]; then
+            echo "::error::bin/sing-box-init 不是 aarch64 (e_machine: ${ELF:36:4}, 期望 b700)"
+            exit 1
+          fi
+
+          # zip 内必须同时有守护进程二进制与核心 tar.gz (customize.sh 依赖两者)
+          LIST=$(unzip -Z1 "$ZIP")
+          for f in module.prop customize.sh service.sh action.sh uninstall.sh daemon.sh \
+                   config/config.json bin/sing-box-init; do
+            grep -qFx "$f" <<<"$LIST" || { echo "::error::$ZIP 缺少 $f"; exit 1; }
+          done
+          grep -qE '^bin/sing-box-.*\.tar\.gz$' <<<"$LIST" \
+            || { echo "::error::$ZIP 缺少 sing-box 核心 tar.gz"; exit 1; }
+          echo "产物校验通过: $ZIP ($(du -h "$ZIP" | cut -f1))"
+
+      - name: 提交版本更新
+        id: commit
+        env:
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add module.prop update.json changelog.md
+
+          if git diff --cached --quiet; then
+            echo "版本文件无变化, 跳过提交"
+          else
+            if [ "$CORE_UPDATED" = true ]; then
+              git commit -m "chore: 更新 sing-box 核心至 ${VERSION}"
+            else
+              git commit -m "chore: 模块更新 (核心未变, build ${VERSION_CODE})"
+            fi
+            # 远端可能已前进: rebase 后重试; 始终失败就直接失败退出 (不发 release, 下次重跑)
+            PUSHED=false
+            for i in 1 2 3; do
+              if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+                PUSHED=true
+                break
+              fi
+              echo "::warning::push 失败 (第 $i 次), rebase 后重试"
+              git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            done
+            [ "$PUSHED" = true ] || { echo "::error::push 失败, 不创建 release"; exit 1; }
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL_TAG: ${{ steps.version.outputs.rel_tag }}
+          REL_TITLE: ${{ steps.version.outputs.rel_title }}
+          REL_NOTES: ${{ steps.version.outputs.rel_notes }}
+          TARGET_SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ZIP="sing-box-init-v${VERSION}.zip"
+          # 幂等: tag/release 已存在 (上次跑到一半) 时覆盖资产并更新标题说明, 不因 "already exists" 失败
+          if gh release view "$REL_TAG" >/dev/null 2>&1; then
+            echo "release $REL_TAG 已存在, 覆盖资产"
+            gh release upload "$REL_TAG" "$ZIP" --clobber
+            gh release edit "$REL_TAG" --title "$REL_TITLE" --notes "$REL_NOTES"
+          else
+            gh release create "$REL_TAG" "$ZIP" \
+              --title "$REL_TITLE" \
+              --notes "$REL_NOTES" \
+              --target "$TARGET_SHA"
+          fi
+          echo "已发布: $REL_TAG"
+
+      - name: 关闭历史失败 issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NUM=$(gh issue list --state open --search 'in:title 自动构建失败' --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh issue close "$NUM" --comment "本次构建成功, 自动关闭。run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          fi
+
+  notify-failure:
+    name: 报告失败
+    needs: [check, build]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 开/更新失败 issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<EOF
+          自动构建链路失败, 需要人工看一眼:
+
+          - run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - 触发方式: ${GITHUB_EVENT_NAME}
+          - 分支: ${GITHUB_REF_NAME}
+
+          (这条 issue 会在下次构建成功后自动关闭)
+          EOF
+          )
+          NUM=$(gh issue list --state open --search 'in:title 自动构建失败' --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "$BODY"
+          else
+            gh issue create --title '自动构建失败' --body "$BODY"
+          fi
