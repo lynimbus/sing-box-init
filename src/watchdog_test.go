@@ -254,3 +254,47 @@ func TestReadPidFile(t *testing.T) {
 		t.Fatalf("文件不存在应返回 -1, 得到 %d", got)
 	}
 }
+
+func TestRotateLogKeepsOnlyLatestGenerations(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "sing-box.log")
+
+	rotateLog(log, coreLogKeep)
+	if fileExists(log) {
+		t.Fatal("没有当前日志时不应凭空造出归档")
+	}
+
+	for i := 1; i <= 5; i++ {
+		rotateLog(log, coreLogKeep)
+		writeFile(log, "第 "+strconv.Itoa(i)+" 次启动\n")
+	}
+
+	if got := readFile(log); got != "第 5 次启动\n" {
+		t.Fatalf("当前日志应是最近一次启动: %q", got)
+	}
+	if got := readFile(rotatedLogPath(log, 1)); got != "第 4 次启动\n" {
+		t.Fatalf(".1 应是上一次启动: %q", got)
+	}
+	if got := readFile(rotatedLogPath(log, 2)); got != "第 3 次启动\n" {
+		t.Fatalf(".2 应是上上次启动: %q", got)
+	}
+	if fileExists(rotatedLogPath(log, 3)) {
+		t.Fatal("只保留 3 次启动, 不应留下第 3 代归档")
+	}
+}
+
+func TestRotateLogIgnoresEmptyCurrentLog(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "sing-box.log")
+	writeFile(log, "")
+	writeFile(rotatedLogPath(log, 1), "旧启动\n")
+
+	rotateLog(log, coreLogKeep)
+
+	if got := readFile(rotatedLogPath(log, 1)); got != "旧启动\n" {
+		t.Fatalf("空日志不应挤掉已有归档: %q", got)
+	}
+	if fileExists(log) {
+		t.Fatal("空日志应被删除")
+	}
+}

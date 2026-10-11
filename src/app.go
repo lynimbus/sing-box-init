@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	logMaxBytes    = 1024 * 1024
-	defaultModDir  = "/data/adb/modules/sing-box-init"
-	defaultDataDir = "/data/adb/sing-box"
+	watchdogLogMaxBytes = 1024 * 1024
+	coreLogMaxBytes     = 256 * 1024
+	coreLogKeep         = 3
+	defaultModDir       = "/data/adb/modules/sing-box-init"
+	defaultDataDir      = "/data/adb/sing-box"
 )
 
 type app struct {
@@ -78,7 +80,7 @@ func resolveModDir() string {
 }
 
 func (a *app) log(level string, format string, args ...any) {
-	truncateIfLarger(a.watchdogLog, logMaxBytes)
+	truncateIfLarger(a.watchdogLog, watchdogLogMaxBytes)
 	line := time.Now().Format("2006-01-02 15:04:05") + " [" + level + "] " + fmt.Sprintf(format, args...) + "\n"
 	appendFile(a.watchdogLog, line)
 }

@@ -219,11 +219,31 @@ rm -f "$T/data/ignore-term"
 wait_count 1 || fail "强杀后新内核未起来"
 ok "restart 完成, 新内核在跑 (pid $(core_pid))"
 
-say "日志自动截断 (>1MiB 由看门狗清空)"
-dd if=/dev/zero bs=1024 count=1025 2>/dev/null | tr '\0' 'x' >>"$T/data/logs/sing-box.log"
+say "内核日志超限自动截断 (>256KiB 由看门狗清空)"
+dd if=/dev/zero bs=1024 count=257 2>/dev/null | tr '\0' 'x' >>"$T/data/logs/sing-box.log"
 sleep 2
 SIZE=$(wc -c <"$T/data/logs/sing-box.log")
 [ "$SIZE" -lt 1024 ] && ok "sing-box.log 已截断 (${SIZE} 字节)" || fail "sing-box.log 未截断 (${SIZE} 字节)"
+
+say "内核日志: 每次启动轮转, 只保留最近三次 (当前 + .1 + .2)"
+SBX stop
+rm -f "$T/data/logs/sing-box.log"*
+SBX start
+sleep 1
+echo "世代 1" >>"$T/data/logs/sing-box.log"
+SBX restart
+sleep 1
+echo "世代 2" >>"$T/data/logs/sing-box.log"
+SBX restart
+sleep 1
+echo "世代 3" >>"$T/data/logs/sing-box.log"
+SBX restart
+sleep 1
+echo "世代 4" >>"$T/data/logs/sing-box.log"
+grep -q "世代 4" "$T/data/logs/sing-box.log" && ok "当前日志是最近一次启动" || fail "当前日志内容不对"
+grep -q "世代 3" "$T/data/logs/sing-box.log.1" && ok "sing-box.log.1 是上一次启动" || fail "sing-box.log.1 内容不对"
+grep -q "世代 2" "$T/data/logs/sing-box.log.2" && ok "sing-box.log.2 是上上次启动" || fail "sing-box.log.2 内容不对"
+[ -f "$T/data/logs/sing-box.log.3" ] && fail "只该保留三次启动, 却留下了 .3" || ok "更早的启动已丢弃 (无 .3)"
 
 say "看门狗 panic 自愈 (测试用 SING_BOX_INIT_TEST_PANIC)"
 SBX stop

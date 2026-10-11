@@ -367,7 +367,7 @@ func (w *watchdog) tick(exited bool) {
 	if !w.testPanicAt.IsZero() && time.Now().After(w.testPanicAt) {
 		panic("SING_BOX_INIT_TEST_PANIC")
 	}
-	truncateIfLarger(w.a.singboxLog, logMaxBytes)
+	truncateIfLarger(w.a.singboxLog, coreLogMaxBytes)
 
 	w.fingerprint = confFingerprint(w.a.confDir)
 	if w.fingerprint == w.spawnFingerprint {
@@ -463,6 +463,7 @@ func (w *watchdog) gotoState(next st) {
 			w.nextPreflight = time.Now().Add(blockedRecheck)
 			break
 		}
+		rotateLog(w.a.singboxLog, coreLogKeep)
 		c, err := startChild(w.a.bin, []string{"run", "-C", w.a.confDir}, w.a.dataDir, w.a.singboxLog)
 		if err != nil {
 			w.blockReason = "启动失败: " + err.Error()

@@ -46,7 +46,7 @@ KernelSU / Magisk 模块：把 [reF1nd 分支的 sing-box](https://github.com/re
 | 模块描述 | 实时状态：运行中 (pid, 核心版本, 崩溃次数) / 启动受阻原因 / 已禁用 |
 | WebUI 入口 | 打开 sing-box dashboard（需要在配置里加 `services` 里的 `api` 服务，`listen_port` 如 1235） |
 
-日志在 `/data/adb/sing-box/logs/`（`watchdog.log` 看守护进程、`sing-box.log` 看内核，各超过 1MiB 自动截断）。卸载模块**不会**删除 `/data/adb/sing-box/`，配置会保留。
+日志在 `/data/adb/sing-box/logs/`：`watchdog.log` 看守护进程（超过 1MiB 自动截断）；`sing-box.log` 看内核，**每次启动内核都会轮转一次**，只保留最近三次启动（`sing-box.log` 与 `sing-box.log.1` / `.2`），每个文件超过 256KiB 就地截断。卸载模块**不会**删除 `/data/adb/sing-box/`，配置会保留。
 
 ## 从旧版升级
 

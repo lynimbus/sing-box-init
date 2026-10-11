@@ -61,6 +61,35 @@ func truncateIfLarger(p string, max int64) {
 	_ = f.Close()
 }
 
+// rotateLog 把当前日志归档为 path.1, 旧代依次后移, 只保留 keep 代 (含当前日志)。
+// 只能在没有进程持有该日志 fd 时调用: 内核长驻时 fd 绑在 inode 上, rename 对它无效,
+// 所以轮转只能趁内核刚退出、下一个内核还没起来的空档做。
+func rotateLog(path string, keep int) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if st.Size() == 0 {
+		removeFile(path)
+		return
+	}
+	if keep < 2 {
+		removeFile(path)
+		return
+	}
+	removeFile(rotatedLogPath(path, keep-1))
+	for gen := keep - 2; gen >= 1; gen-- {
+		if fileExists(rotatedLogPath(path, gen)) {
+			_ = os.Rename(rotatedLogPath(path, gen), rotatedLogPath(path, gen+1))
+		}
+	}
+	_ = os.Rename(path, rotatedLogPath(path, 1))
+}
+
+func rotatedLogPath(path string, gen int) string {
+	return fmt.Sprintf("%s.%d", path, gen)
+}
+
 func readPidFile(p string) int {
 	s := strings.TrimSpace(readFile(p))
 	if s == "" {

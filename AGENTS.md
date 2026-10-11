@@ -36,7 +36,7 @@ KernelSU(兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运�
 7. **看门狗自愈**：panic → 记日志 → 杀掉孤儿内核 → `exec` 自身（**pid 不变**，`flock` 锁随 fd 继承，靠 `SING_BOX_INIT_LOCK_FD` 传递并校验指向锁文件）→ 1 小时内最多 5 次，超限退出。测试钩子：环境变量 `SING_BOX_INIT_TEST_PANIC=<秒>`。
 8. **单实例**：`flock` 锁 `$DATA_DIR/.watchdog.lock`。
 9. **状态文件** `logs/watchdog.state`：`state / core / crashes / reason / updated`，`status` 与描述都从它 + `/proc` 实测组合出结果。
-10. 日志 1MiB 自动截断：`watchdog.log` 写入前检查；`sing-box.log` 每 tick 原地清空（内核长驻持有 fd，rename 旋转没用）。
+10. 日志上限：`watchdog.log` 1MiB，写入前检查后原地截断。`sing-box.log` 每次启动内核前轮转为 `.1` / `.2`（`coreLogKeep = 3`，即最近三次启动），每个文件超过 256KiB（`coreLogMaxBytes`）由 tick 原地清空。⚠️ 轮转必须在内核启动前做：内核长驻持有日志 fd，fd 绑在 inode 上，运行中 rename 对它无效；能轮转的时机只有"上一个内核刚退出、下一个还没起来"。
 11. cron/tick 频率 500ms；启动确认 5s、停止宽限 10s、退避 3s、去抖 800ms。
 
 **模块描述双写**：`ksud module config set override.description <desc>` + **原地改写** `module.prop` 的 `description=` 行。
