@@ -1,15 +1,15 @@
-## sing-box 核心更新至 1.15.0-alpha.11
+## sing-box 核心更新至 1.15.0-alpha.13
 
-## sing-box v1.15.0-alpha.11-reF1nd
+## sing-box v1.15.0-alpha.13-reF1nd
 
 | Field | Value |
 |---|---|
 | Channel | `testing` |
-| Version | `1.15.0-alpha.11-reF1nd` |
-| sing-box Commit | [`78ea0ce9257bd3bedd4d1185d6cc4723f04096b4`](https://github.com/reF1nd/sing-box/commit/78ea0ce9257bd3bedd4d1185d6cc4723f04096b4) |
-| Built At | 2026-10-09T14:59:10Z |
-| Published At | 2026-10-09T15:01:18Z |
-| Build Run ID | [37946171626](https://github.com/reF1nd/sing-box-releases/actions/runs/37946171626) |
-| Publish Run ID | [37948471060](https://github.com/reF1nd/sing-box-releases/actions/runs/37948471060) |
+| Version | `1.15.0-alpha.13-reF1nd` |
+| sing-box Commit | [`17397d022647b73378705e1f91ff031dddaaec21`](https://github.com/reF1nd/sing-box/commit/17397d022647b73378705e1f91ff031dddaaec21) |
+| Built At | 2026-10-25T15:18:12Z |
+| Published At | 2026-10-25T15:23:29Z |
+| Build Run ID | [40204640422](https://github.com/reF1nd/sing-box-releases/actions/runs/40204640422) |
+| Publish Run ID | [40206660486](https://github.com/reF1nd/sing-box-releases/actions/runs/40206660486) |
 
-> 发布页: https://github.com/reF1nd/sing-box-releases/releases/tag/v1.15.0-alpha.11-reF1nd
+> 发布页: https://github.com/reF1nd/sing-box-releases/releases/tag/v1.15.0-alpha.13-reF1nd
