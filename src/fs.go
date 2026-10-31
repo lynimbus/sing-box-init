@@ -184,12 +184,6 @@ func (cs *confScanner) fingerprint(dir string) string {
 	return cs.last
 }
 
-// confFingerprint 一次性求指纹 (初始化与测试用); 热路径走 confScanner。
-func confFingerprint(dir string) string {
-	var cs confScanner
-	return cs.fingerprint(dir)
-}
-
 func waitExit(pid int, d time.Duration) {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {

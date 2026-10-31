@@ -154,28 +154,30 @@ func TestReloadDueNeedsDebounceAndRunning(t *testing.T) {
 	}
 }
 
-func TestConfFingerprintDetectsEveryKindOfChange(t *testing.T) {
+func TestConfScannerDetectsEveryKindOfChange(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.json")
+	var scan confScanner
+	fp := func() string { return scan.fingerprint(dir) }
 	writeFile(cfg, `{"a":1}`)
-	base := confFingerprint(dir)
+	base := fp()
 
 	writeFile(cfg, `{"a":2}`)
 	st, _ := os.Stat(cfg)
 	os.Chtimes(cfg, st.ModTime().Add(time.Second), st.ModTime().Add(time.Second))
-	if confFingerprint(dir) == base {
+	if fp() == base {
 		t.Fatal("内容与 mtime 变化后指纹应改变")
 	}
 
-	base = confFingerprint(dir)
+	base = fp()
 	writeFile(filepath.Join(dir, "extra.json"), `{}`)
-	if confFingerprint(dir) == base {
+	if fp() == base {
 		t.Fatal("新增配置后指纹应改变")
 	}
 
-	base = confFingerprint(dir)
+	base = fp()
 	removeFile(filepath.Join(dir, "extra.json"))
-	if confFingerprint(dir) == base {
+	if fp() == base {
 		t.Fatal("删除配置后指纹应改变")
 	}
 }

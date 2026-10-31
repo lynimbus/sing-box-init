@@ -44,10 +44,6 @@ chmod 0755 "$MODPATH"/*.sh 2>/dev/null
 DATA_DIR=/data/adb/sing-box
 mkdir -p "$DATA_DIR" "$DATA_DIR/logs" "$DATA_DIR/conf.d"
 
-# 清理旧版遗留 (白名单纯文本文件与生成目录已废弃, 留着只会误导)
-rm -f "$DATA_DIR/include_package" "$DATA_DIR/include_package.disable"
-rm -rf "$DATA_DIR/conf.d.generated"
-
 if [ ! -f "$DATA_DIR/conf.d/config.json" ]; then
     cp -f "$MODPATH/config/config.json" "$DATA_DIR/conf.d/config.json"
     ui_print "[sing-box-init] 已生成默认配置: $DATA_DIR/conf.d/config.json"

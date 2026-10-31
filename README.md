@@ -20,7 +20,7 @@ KernelSU / Magisk 模块：把 [reF1nd 分支的 sing-box](https://github.com/re
     "type": "ebpf",
     "tag": "ebpf-in",
     "local": { "enabled": true },
-    "shared": { "enabled": true, "interface": ["wlan0", "rndis0"] }
+    "shared": { "enabled": true, "interface": ["wlan2", "rndis0"] }
   }
 ]
 ```
@@ -28,7 +28,7 @@ KernelSU / Magisk 模块：把 [reF1nd 分支的 sing-box](https://github.com/re
 （上面同时列了 `shared` 的写法；默认示例里没有 `shared`，没写就是只接管本机。）
 
 - **`local`** — 接管**本机**流量，可用 `include_package` / `exclude_package` / `include_uid` / `exclude_uid` 等做过滤（不写过滤器就是全部本机流量）。
-- **`shared`** — 接管**共享出去的下游**流量（Wi-Fi 热点、USB 共享）。`interface` 是必填的下游接口名：热点通常是 `wlan0`（部分机型是 `ap0`/`softap0`），USB 共享是 `rndis0`。⚠️ 列出暂时不存在的接口是安全的，sing-box 会等到它出现；接口成为当前上网出口时会被自动暂停接管。
+- **`shared`** — 接管**共享出去的下游**流量（Wi-Fi 热点、USB 共享）。`interface` 是必填的下游接口名，**因机型而异**：实测 Xiaomi 14 / HyperOS 热点是 `wlan2`，其他常见 `ap0` / `softap0`；⚠️ `wlan0` 一般是普通 Wi-Fi 站接口，不要列。USB 共享是 `rndis0`。不确定的话开热点后跑 `su -c 'tc filter show dev <接口名> ingress'`，被接管的接口里会出现 `sb_share_in`。列出暂时不存在的接口是安全的，sing-box 会等到它出现；接口成为当前上网出口时会被自动暂停接管。
   ⚠️ **不启用就整块别写**：`"shared": {"enabled": false}` 会被拒绝（`shared options require shared interception`，真机实测）。
 - `dns_mode` 默认为 `respect_policy`：先按 uid/包名/来源过滤，再接管目标端口 53。
 - `bypass_private_address` 默认 `true`：目标是私有/保留地址（局域网）时不接管。
@@ -47,12 +47,6 @@ KernelSU / Magisk 模块：把 [reF1nd 分支的 sing-box](https://github.com/re
 | WebUI 入口 | 打开 sing-box dashboard（需要在配置里加 `services` 里的 `api` 服务，`listen_port` 如 1235） |
 
 日志在 `/data/adb/sing-box/logs/`：`watchdog.log` 看守护进程（超过 1MiB 自动截断）；`sing-box.log` 看内核，**每次启动内核都会轮转一次**，只保留最近三次启动（`sing-box.log` 与 `sing-box.log.1` / `.2`），每个文件超过 256KiB 就地截断。卸载模块**不会**删除 `/data/adb/sing-box/`，配置会保留。
-
-## 从旧版升级
-
-如果你的版本里还有 `include_package` 纯文本白名单文件：新版本已取消这套机制（改由配置里 `local` 的过滤器决定），刷入新 zip 时该文件会被自动清理，请把包名写进配置。
-
-⚠️ **1.15 核心的 ebpf 入站去掉了 `mode` 字段**：老配置（`"mode": "hybrid"`）在新核心上会直接报 `unknown field "mode"`，需要改写为 `local` / `shared` 两个平面（热点 = `shared`）。
 
 ## 构建
 
