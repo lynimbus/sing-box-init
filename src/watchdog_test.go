@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -280,6 +281,112 @@ func TestRotateLogKeepsOnlyLatestGenerations(t *testing.T) {
 	}
 	if fileExists(rotatedLogPath(log, 3)) {
 		t.Fatal("只保留 3 次启动, 不应留下第 3 代归档")
+	}
+}
+
+func TestTickIntervalFor(t *testing.T) {
+	if tickIntervalFor(stRunning) != idleTick || tickIntervalFor(stDisabled) != idleTick || tickIntervalFor(stBlocked) != idleTick {
+		t.Fatal("稳态状态应降频到 idleTick")
+	}
+	for _, s := range []st{stStarting, stStopping, stCrashBackoff, stExiting} {
+		if tickIntervalFor(s) != tickInterval {
+			t.Fatalf("瞬态状态 %v 应保持快 tick", s)
+		}
+	}
+}
+
+func TestConfScannerReuseAndNoAliasing(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(filepath.Join(dir, "b.json"), `{}`)
+	writeFile(filepath.Join(dir, "a.json"), `{}`)
+
+	var cs confScanner
+	f1 := cs.fingerprint(dir)
+	// 未变化的复扫: 结果应等于旧串且不换新串 (无别名)
+	f2 := cs.fingerprint(dir)
+	if f1 != f2 {
+		t.Fatalf("未变化的目录指纹不应漂移: %q vs %q", f1, f2)
+	}
+	if &f1 == &f2 {
+		t.Fatal("不可言: 两次调用的返回值地址")
+	}
+
+	// 变化后必须产生新串
+	writeFile(filepath.Join(dir, "a.json"), `{"x":1}`)
+	f3 := cs.fingerprint(dir)
+	if f3 == f2 {
+		t.Fatal("内容变化必须改变指纹")
+	}
+	if !strings.Contains(f3, "a.json") || strings.HasPrefix(f3, "b.json") {
+		t.Fatalf("指纹应按文件名排序: %q", f3)
+	}
+	// 无别名: 指纹含 mtime, 同内容重写也算变化; 先前返回值的底层字节
+	// 不得被内部缓冲的后续复用所覆写
+	snap := []byte(f2)
+	writeFile(filepath.Join(dir, "a.json"), `{"y":2}`)
+	cs.fingerprint(dir)
+	cs.fingerprint(filepath.Join(dir, "nope")) // unreadable 分支也不能破坏状态
+	if string(snap) != f2 {
+		t.Fatalf("先前返回的指纹被覆写: %q -> %q", string(snap), f2)
+	}
+}
+
+func TestDescFromMemory(t *testing.T) {
+	a := testApp(t)
+	// 用脚本内核当真子进程: pid 文件指向它, ownsProcess 经 argv[1] 精确命中,
+	// 磁盘版 describe() 因此能给出 "运行中" —— 与看门狗视角一致
+	ensureDir(filepath.Dir(a.bin))
+	writeFile(a.bin, "#!/bin/sh\nsleep 30\n")
+	_ = os.Chmod(a.bin, 0o755)
+	c, err := startChild(a.bin, nil, a.dataDir, filepath.Join(a.logDir, "core.log"))
+	if err != nil {
+		t.Fatalf("stub 内核启动失败: %v", err)
+	}
+	defer func() {
+		c.kill()
+		<-c.done
+	}()
+	writeFile(a.pidFile, strconv.Itoa(c.pid)+"\n")
+	writeFile(a.wpidFile, strconv.Itoa(os.Getpid())+"\n")
+	w := &watchdog{a: a, coreVersion: "stub-1.0", crashes: 2, ch: c}
+	w.state = stRunning
+	w.blockReason = "配置错误, 已保留旧配置运行"
+	a.writeState(stateInfo{state: w.state.String(), core: w.coreVersion, crashes: w.crashes, reason: w.blockReason})
+	if got, want := w.descFromMemory(), a.describe(); got != want {
+		t.Fatalf("运行中: 内存版 %q != 磁盘版 %q", got, want)
+	}
+
+	// 崩溃计数变化 (心跳周期内): 内存版必须立即反映, 磁盘版读的是旧 state 文件
+	w.crashes = 3
+	if got := w.descFromMemory(); !strings.Contains(got, "崩溃 3 次") {
+		t.Fatalf("内存版应立即反映最新崩溃计数: %q", got)
+	}
+	w.crashes = 2
+
+	w.ch = nil
+	removeFile(a.pidFile)
+	for _, s := range []st{stStarting, stStopping, stCrashBackoff, stBlocked, stDisabled, stRunning} {
+		w.state = s
+		w.blockReason = ""
+		if s == stBlocked {
+			w.blockReason = "配置校验失败: boom"
+		}
+		if s == stDisabled {
+			writeFile(a.disableFlag, "")
+		} else {
+			removeFile(a.disableFlag)
+		}
+		a.writeState(stateInfo{state: s.String(), core: w.coreVersion, crashes: w.crashes, reason: w.blockReason})
+		if got, want := w.descFromMemory(), a.describe(); got != want {
+			t.Fatalf("%v: 内存版 %q != 磁盘版 %q", s, got, want)
+		}
+	}
+}
+
+func TestConfScannerUnreadableDir(t *testing.T) {
+	var cs confScanner
+	if f := cs.fingerprint(filepath.Join(t.TempDir(), "nope")); f != "unreadable" {
+		t.Fatalf("不存在的目录应返回 unreadable: %q", f)
 	}
 }
 

@@ -11,7 +11,7 @@ KernelSU(兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运�
 - `src/`
   - `main.go` — 子命令分发 `start|stop|restart|status|watchdog_loop`；`stop` 的顺序是"先停看门狗再停内核"（见坑 15）
   - `app.go` — 路径解析、日志、状态文件、模块描述双写、`describe()`
-  - `watchdog.go` — 状态机与主循环；`transition` / `deriveEvent` / `stopEscalation` / `reloadDue` 都是纯函数（可单测）
+  - `watchdog.go` — 状态机与主循环；`transition` / `deriveEvent` / `stopEscalation` / `reloadDue` / `tickIntervalFor` / `descFromMemory` 都是纯函数或无 IO 函数（可单测）
   - `proc.go` — 子进程句柄、进程归属的严格判定
   - `fs.go` — 文件工具、配置指纹
   - `watchdog_test.go` — 纯函数单测（`go test`）
@@ -30,16 +30,16 @@ KernelSU(兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运�
 1. **进程真相源 = 句柄**（`exec.Cmd`）。pid 文件只是给人看的（描述、`status`）。
 2. **只有 `Wait()` 返回（或句柄不存在）才算子进程已死**：发了 SIGTERM 不等于已停止。`Stopping` 里先 TERM，10 秒后 SIGKILL，再等 `Wait()`，然后才进 `Disabled`/`Starting`。
 3. **存活/归属判定必须精确**：`ownsProcess` 比对 `/proc/PID/exe` 或 argv 字段（脚本内核的路径在 argv[1]），**不能用"cmdline 含 sing-box"这种子串判断**——看门狗自己的 argv 是 `sing-box-init`，也会命中。
-4. **热重载 = 权威重查**：每 tick 对 `conf.d/` 算指纹（文件名+大小+mtime），与"启动时用的指纹"比较；不依赖 inotify 事件（曾经把 inotify 当唯一真相源，事件丢一次就永不重载）。变化后去抖 800ms。
+4. **热重载 = 权威重查**：每 tick 对 `conf.d/` 算指纹（文件名+大小+mtime），与"启动时用的指纹"比较；不依赖 inotify 事件（曾经把 inotify 当唯一真相源，事件丢一次就永不重载）。变化后去抖 800ms（稳态 2s tick 下实际由 tick 粒度决定）。指纹由 `confScanner`（fs.go）计算：readdir + lstat 不可避免，但排序/格式化/拼接跨 tick 复用，未变化时零分配，返回值与内部缓冲不别名。
 5. **重启前必须 `sing-box check -C <conf.d>`**：校验失败就不重启，旧内核继续跑，日志与模块描述里报"配置错误"；配置改回当前运行版本时自动清掉该标记。
 6. 崩溃退避 3 秒；连续稳定运行 60 秒后清零崩溃计数。描述里显示核心版本与崩溃次数，方便一眼看出"是不是新核心搞的"。
 7. **看门狗自愈**：panic → 记日志 → 杀掉孤儿内核 → `exec` 自身（**pid 不变**，`flock` 锁随 fd 继承，靠 `SING_BOX_INIT_LOCK_FD` 传递并校验指向锁文件）→ 1 小时内最多 5 次，超限退出。测试钩子：环境变量 `SING_BOX_INIT_TEST_PANIC=<秒>`。
 8. **单实例**：`flock` 锁 `$DATA_DIR/.watchdog.lock`。
 9. **状态文件** `logs/watchdog.state`：`state / core / crashes / reason / updated`，`status` 与描述都从它 + `/proc` 实测组合出结果。
 10. 日志上限：`watchdog.log` 1MiB，写入前检查后原地截断。`sing-box.log` 每次启动内核前轮转为 `.1` / `.2`（`coreLogKeep = 3`，即最近三次启动），每个文件超过 256KiB（`coreLogMaxBytes`）由 tick 原地清空。⚠️ 轮转必须在内核启动前做：内核长驻持有日志 fd，fd 绑在 inode 上，运行中 rename 对它无效；能轮转的时机只有"上一个内核刚退出、下一个还没起来"。
-11. cron/tick 频率 500ms；启动确认 5s、停止宽限 10s、退避 3s、去抖 800ms。
+11. **tick 自适应**（省电）：瞬态状态（Starting/Stopping/CrashBackoff/Exiting）500ms，稳态（Running/Disabled/Blocked）2s。崩溃检测不受影响——子进程退出由 `done` channel 即时唤醒，不经 tick；受影响的是配置变化/模块开关的感知延迟（最长约 2s）与热重载总延迟（最长约 4s）。启动确认 5s、停止宽限 10s、退避 3s、去抖 800ms。
 
-**模块描述双写**：`ksud module config set override.description <desc>` + **原地改写** `module.prop` 的 `description=` 行。
+**模块描述双写**：`ksud module config set override.description <desc>` + **原地改写** `module.prop` 的 `description=` 行。看门狗每 tick 用 `descFromMemory()`（内存权威值）拼描述，与 `describe()` 磁盘版**逐字一致**（有单测对拍）——别让看门狗热路径回读磁盘；外部命令（status/start/stop）仍走磁盘版，磁盘是它们唯一的信息源。
 ⚠️ 不要改成"写临时文件再 rename"：rename 会把 module.prop 的 SELinux context 换成新文件的，Manager 可能因此读不到它。
 
 ## 关键约束（易踩坑）

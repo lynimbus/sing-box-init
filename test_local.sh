@@ -142,7 +142,8 @@ sleep 3
 say "非法配置: 拒绝重启并保留旧内核"
 OLD=$NEW
 printf '{"bad": true}\n' >"$T/data/conf.d/bad.json"
-sleep 3
+# 稳态 tick 是 2s: 检测 ≤2s + 去抖在下一 tick 满足 (~4s) + preflight
+sleep 6
 [ "$(core_pid)" = "$OLD" ] && alive "$OLD" || fail "非法配置时不应重启内核"
 ok "旧内核仍在运行 (pid $OLD), 未被非法配置打断"
 grep -q "新配置校验失败" "$T/data/logs/watchdog.log" || fail "日志缺少配置校验失败记录"
@@ -151,7 +152,7 @@ grep -q "配置错误" "$T/module/module.prop" && ok "描述标出配置错误" 
 
 say "撤销非法配置: 恢复当前版本, 不重启"
 rm -f "$T/data/conf.d/bad.json"
-sleep 2
+sleep 4
 [ "$(core_pid)" = "$OLD" ] && alive "$OLD" || fail "撤销非法配置不应重启内核"
 ok "撤销非法配置后内核未被打扰 (pid $OLD)"
 grep -q "配置已恢复到当前运行版本" "$T/data/logs/watchdog.log" || fail "未记录配置恢复"
@@ -221,7 +222,7 @@ ok "restart 完成, 新内核在跑 (pid $(core_pid))"
 
 say "内核日志超限自动截断 (>256KiB 由看门狗清空)"
 dd if=/dev/zero bs=1024 count=257 2>/dev/null | tr '\0' 'x' >>"$T/data/logs/sing-box.log"
-sleep 2
+sleep 4
 SIZE=$(wc -c <"$T/data/logs/sing-box.log")
 [ "$SIZE" -lt 1024 ] && ok "sing-box.log 已截断 (${SIZE} 字节)" || fail "sing-box.log 未截断 (${SIZE} 字节)"
 
@@ -249,7 +250,8 @@ say "看门狗 panic 自愈 (测试用 SING_BOX_INIT_TEST_PANIC)"
 SBX stop
 rm -f "$T/data/.watchdog-selfheal"
 SING_BOX_INIT_TEST_PANIC=6 SING_BOX_DATA_DIR="$T/data" "$T/module/bin/sing-box-init" start
-sleep 8
+# Running 态 tick 2s: panic(6s) 最迟在 8s 被检出
+sleep 12
 grep -q "看门狗 panic" "$T/data/logs/watchdog.log" || fail "未触发 panic 自愈"
 ok "检测到 panic 并自愈"
 WPID=$(wd_pid)

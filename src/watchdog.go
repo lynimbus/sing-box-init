@@ -12,7 +12,11 @@ import (
 )
 
 const (
-	tickInterval        = 500 * time.Millisecond
+	tickInterval = 500 * time.Millisecond
+	// 稳态降频: Running/Disabled/Blocked 下没有亚秒级决策 (崩溃由 done channel 即时唤醒,
+	// 不经 tick), 拉长周期让 SoC 有机会停留更深的空闲态; 瞬态状态维持快 tick,
+	// 保证启动确认/停止宽限/退避计时与去抖时序不变。
+	idleTick            = 2 * time.Second
 	startConfirm        = 5 * time.Second
 	stopGrace           = 10 * time.Second
 	crashBackoff        = 3 * time.Second
@@ -216,10 +220,20 @@ func reloadDue(s st, changeSeenAt time.Time, now time.Time) bool {
 	return s == stRunning && !changeSeenAt.IsZero() && now.Sub(changeSeenAt) >= reloadDebounce
 }
 
+// tickIntervalFor 按状态选 tick 周期: 稳态慢, 瞬态快。
+func tickIntervalFor(s st) time.Duration {
+	switch s {
+	case stRunning, stDisabled, stBlocked:
+		return idleTick
+	}
+	return tickInterval
+}
+
 type watchdog struct {
 	a *app
 
 	state       st
+	scan        confScanner
 	ch          *child
 	crashes     int
 	coreVersion string
@@ -246,7 +260,8 @@ type watchdog struct {
 func newWatchdog(a *app) *watchdog {
 	w := &watchdog{a: a}
 	w.coreVersion = coreVersion(a.bin)
-	w.fingerprint = confFingerprint(a.confDir)
+	// 与后续 tick 用同一个 scanner, 保证指纹的排序口径在进程内始终一致
+	w.fingerprint = w.scan.fingerprint(a.confDir)
 	w.spawnFingerprint = w.fingerprint
 	if v := os.Getenv("SING_BOX_INIT_TEST_PANIC"); v != "" {
 		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
@@ -309,8 +324,8 @@ func (w *watchdog) run() {
 	w.killOrphanCore()
 	w.gotoState(w.initialState())
 
-	ticker := time.NewTicker(tickInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(tickIntervalFor(w.state))
+	defer timer.Stop()
 	for {
 		exited := w.observeChild()
 		w.tick(exited)
@@ -322,8 +337,16 @@ func (w *watchdog) run() {
 		if w.ch != nil {
 			exitCh = w.ch.done
 		}
+		// 周期随状态变: exitCh 提前唤醒后整个周期重置 (瞬态下这只会更勤, 不会更懒)
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(tickIntervalFor(w.state))
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 		case <-exitCh:
 		}
 	}
@@ -369,7 +392,7 @@ func (w *watchdog) tick(exited bool) {
 	}
 	truncateIfLarger(w.a.singboxLog, coreLogMaxBytes)
 
-	w.fingerprint = confFingerprint(w.a.confDir)
+	w.fingerprint = w.scan.fingerprint(w.a.confDir)
 	if w.fingerprint == w.spawnFingerprint {
 		w.changeSeenAt = time.Time{}
 		if w.badFingerprint != "" {
@@ -509,12 +532,50 @@ func (w *watchdog) updateDesc() {
 			reason:  w.blockReason,
 		})
 	}
-	desc := w.a.describe()
+	// 描述从内存权威值拼, 不经 describe() 回读磁盘: pid/state 文件本来就是本进程写的,
+	// ownsProcess 的 EvalSymlinks 在二进制路径不变的前提下纯属重复劳动 (每 tick 省下
+	// 1 次 state 读 + 2 次 pid 读 + 2 次 EvalSymlinks 及全部相关分配)。
+	desc := w.descFromMemory()
 	if desc == w.lastDesc {
 		return
 	}
 	w.lastDesc = desc
 	w.a.setDescription(desc)
+}
+
+// descFromMemory 与 app.describe() 输出逐字一致, 但全部取自看门狗内存里的权威值。
+// 外部命令 (status/start/stop) 仍走 describe() 的磁盘版: 磁盘是它们唯一的信息源。
+func (w *watchdog) descFromMemory() string {
+	if w.ch != nil && w.ch.alive() {
+		desc := fmt.Sprintf("sing-box: 运行中 (pid %d", w.ch.pid)
+		if w.coreVersion != "" {
+			desc += ", core " + w.coreVersion
+		}
+		if w.crashes > 0 {
+			desc += fmt.Sprintf(", 崩溃 %d 次", w.crashes)
+		}
+		desc += ")"
+		// 看门狗自身必然在跑, 不会出现磁盘版的 [看门狗未运行] 分支
+		if w.blockReason != "" {
+			desc += " " + truncate(w.blockReason, 60)
+		}
+		return desc
+	}
+	if w.a.moduleDisabled() {
+		return "sing-box: 未运行 (模块已禁用)"
+	}
+	// wpid 恒 > 0 (本进程), 对应磁盘版的 wpid>0 分支
+	switch w.state {
+	case stStarting:
+		return "sing-box: 启动中…"
+	case stStopping:
+		return "sing-box: 停止中…"
+	case stCrashBackoff:
+		return fmt.Sprintf("sing-box: 崩溃退避中 (第 %d 次)", w.crashes)
+	case stBlocked:
+		return "sing-box: 未运行 (启动受阻: " + truncate(w.blockReason, 60) + ")"
+	}
+	return "sing-box: 未运行 (看门狗待命)"
 }
 
 func (w *watchdog) preflight() string {

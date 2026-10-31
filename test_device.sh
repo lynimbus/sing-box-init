@@ -125,12 +125,13 @@ wait_pid_change "$OLD" || bad "配置变化后未重启"
 say "非法配置: 拒绝重启并保留旧内核"
 OLD=$(core_pid)
 echo '{' >"$DATA/conf.d/zz-test-bad.json"
-sleep 3
+# 稳态 tick 2s: 检测 ≤2s + 去抖下一 tick (~4s) + 真内核 check 耗时
+sleep 8
 [ "$(core_pid)" = "$OLD" ] && alive "$OLD" && ok "旧内核未被打断 (pid $OLD)" || bad "非法配置导致内核被重启/打断"
 grep -q "新配置校验失败" "$LOG" && ok "日志记录了配置校验失败" || bad "日志缺少校验失败记录"
 grep -q "配置错误" "$MODDIR/module.prop" && ok "描述标出配置错误" || bad "描述未标出配置错误"
 rm -f "$DATA/conf.d/zz-test-bad.json"
-sleep 3
+sleep 5
 grep -q "配置已恢复到当前运行版本" "$LOG" && ok "撤销非法配置后清掉了错误标记" || bad "未记录配置恢复"
 grep -q "配置错误" "$MODDIR/module.prop" && bad "描述仍标着配置错误" || ok "描述恢复正常"
 

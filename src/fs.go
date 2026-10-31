@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -117,14 +116,32 @@ func configFiles(dir string) []string {
 	return out
 }
 
-// confFingerprint 是配置目录内容的权威指纹: 任何增删改都会改变它。
+type fileSig struct {
+	name  string
+	size  int64
+	mtime int64
+}
+
+// confScanner 是配置目录内容的权威指纹计算器: 任何增删改都会改变指纹。
 // 热重载靠它判断, 不依赖 inotify 事件是否送达。
-func confFingerprint(dir string) string {
+// 看门狗每 tick 调用一次, 所以把排序、格式化、拼接的分配全部跨 tick 复用;
+// readdir + 每文件一次 lstat 是信息本身要求的系统调用, 无法省。
+// 未变化时连结果字符串都不分配: Builder.String() 是内部缓冲的零拷贝视图,
+// 与上次克隆比较相等就直接返回旧串 —— 因此返回值与内部缓冲永不别名。
+type confScanner struct {
+	ents  []fileSig
+	num   []byte
+	b     strings.Builder
+	last  string
+	valid bool
+}
+
+func (cs *confScanner) fingerprint(dir string) string {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return "unreadable"
 	}
-	parts := make([]string, 0, len(ents))
+	sigs := cs.ents[:0]
 	for _, e := range ents {
 		if e.IsDir() {
 			continue
@@ -133,10 +150,44 @@ func confFingerprint(dir string) string {
 		if err != nil {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s:%d:%d", e.Name(), info.Size(), info.ModTime().UnixNano()))
+		sigs = append(sigs, fileSig{e.Name(), info.Size(), info.ModTime().UnixNano()})
 	}
-	sort.Strings(parts)
-	return strings.Join(parts, "|")
+	cs.ents = sigs
+	// 配置目录只有个位数文件, 插入排序避免 sort.Slice 的闭包与 swapper 分配
+	for i := 1; i < len(sigs); i++ {
+		s := sigs[i]
+		j := i - 1
+		for j >= 0 && sigs[j].name > s.name {
+			sigs[j+1] = sigs[j]
+			j--
+		}
+		sigs[j+1] = s
+	}
+	cs.b.Reset()
+	for i, s := range sigs {
+		if i > 0 {
+			cs.b.WriteByte('|')
+		}
+		cs.b.WriteString(s.name)
+		cs.b.WriteByte(':')
+		cs.num = strconv.AppendInt(cs.num[:0], s.size, 10)
+		cs.b.Write(cs.num)
+		cs.b.WriteByte(':')
+		cs.num = strconv.AppendInt(cs.num[:0], s.mtime, 10)
+		cs.b.Write(cs.num)
+	}
+	if cs.valid && cs.b.String() == cs.last {
+		return cs.last
+	}
+	cs.last = strings.Clone(cs.b.String())
+	cs.valid = true
+	return cs.last
+}
+
+// confFingerprint 一次性求指纹 (初始化与测试用); 热路径走 confScanner。
+func confFingerprint(dir string) string {
+	var cs confScanner
+	return cs.fingerprint(dir)
 }
 
 func waitExit(pid int, d time.Duration) {
