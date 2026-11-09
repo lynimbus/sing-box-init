@@ -13,8 +13,14 @@ name: Update sing-box Core
 #   5. 顺序是 构建 → 提交推送 → 发 release: 先推再打 tag, tag 才能指向包含新版本号的提交。
 #      构建失败就不会有孤立 tag/release; push 失败直接失败退出, 不发 release (下次重跑仍是同一 versionCode)。
 #   6. release 步骤幂等: tag 已存在 (上次跑到一半) 时改为覆盖上传资产, 不会因 "already exists" 失败。
-#   7. 核心取版优先 prerelease: 本模块依赖 reF1nd 分支的 eBPF 实现 (热点流量劫持), 新特性只在预发布里。
+#   7. 核心取版优先 prerelease: 预发布即上游 master, 与 main 书签原来的 1.15.0-alpha 跟踪节奏一致;
+#      只想跟正式版就把下面的 select(.prerelease) 删掉 (最新正式版会落后一个小版本)。
 #   8. 构建入口只有 build.sh 一个 (本地与 CI 共用), 不在 workflow 里重写一套编译逻辑。
+#   9. 本分支核心是官方 SagerNet/sing-box, 没有 ebpf 入站: 热点劫持改由 tun 的 auto_redirect 承担
+#      (上游文档明确写了 Android root 下支持, 含热点/中继的转发流量), 别抄 main 书签的 ebpf 配置。
+#  10. 官方 release 的 android-arm64 预编译产物没有 with_naive_outbound, 因此从 CORE_TAG 源码用
+#      Android NDK (CGO_ENABLED=1) 按上游 release/DEFAULT_BUILD_TAGS 编译打包 (Android 上 cronet-go
+#      只提供静态库 libcronet.a, 不提供 libcronet.so, 所以不能加 with_purego)。
 
 on:
   schedule:
@@ -40,8 +46,8 @@ defaults:
     shell: bash
 
 env:
-  # sing-box 核心来源 (reF1nd 分支: 带 eBPF 入站的那份)
-  CORE_REPO: reF1nd/sing-box-releases
+  # sing-box 核心来源 (官方上游; main 书签用 reF1nd 分支那份, 带 ebpf 入站)
+  CORE_REPO: SagerNet/sing-box
 
 jobs:
   check:
@@ -53,9 +59,8 @@ jobs:
       version: ${{ steps.check.outputs.version }}
       core_tag: ${{ steps.check.outputs.core_tag }}
       core_updated: ${{ steps.check.outputs.core_updated }}
-      asset_name: ${{ steps.check.outputs.asset_name }}
-      asset_url: ${{ steps.check.outputs.asset_url }}
       last_tag: ${{ steps.check.outputs.last_tag }}
+      changed_files: ${{ steps.check.outputs.changed_files }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -82,7 +87,7 @@ jobs:
 
           CORE_TAG=$(jq -r '.tag_name // empty' <<<"$RELEASE_JSON")
           [ -n "$CORE_TAG" ] || { echo "::error::release 缺少 tag_name"; exit 1; }
-          VERSION=$(sed 's/^v//; s/-reF1nd$//' <<<"$CORE_TAG")
+          VERSION=${CORE_TAG#v}
           # 版本号必须形如 1.14.0 / 1.14.0-rc.4, 否则后面 versionCode 与 zip 名都会算错
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]]; then
             echo "::error::解析出的版本号不合法: '${VERSION}' (tag: ${CORE_TAG})"
@@ -99,21 +104,13 @@ jobs:
             CORE_UPDATED=true
           fi
 
-          # ---- arm64 核心资产 ----
-          ASSET=$(jq -c '
-            [.assets[] | select(.name | test("^sing-box-.*-android-arm64\\.tar\\.gz$"))] | first
-            // empty' <<<"$RELEASE_JSON")
-          if [ -z "$ASSET" ]; then
-            echo "::error::${CORE_TAG} 里没有 android-arm64 tar.gz 资产, 现有资产:"
-            jq -r '.assets[].name' <<<"$RELEASE_JSON" | sed 's/^/  /'
-            exit 1
-          fi
-          ASSET_NAME=$(jq -r '.name' <<<"$ASSET")
-          ASSET_URL=$(jq -r '.browser_download_url' <<<"$ASSET")
-
           # ---- 项目文件是否有更新 (自上次 release 以来) ----
           # 排除工作流自身维护的文件, 否则工作流自己的提交会再次触发构建, 每天空转发版。
-          LAST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=1" --jq '.[0].tag_name // empty' || true)
+          # 只认本分支的 release (tag 前缀 official-): 否则会拿 main 书签的 release 去 compare,\
+          # 两个书签的提交树永远不同 → 天天判定"有变更" → 空转发版
+          LAST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '[.[]|.tag_name|select(startswith("official-"))][0]// empty' \
+            || true)
           CHANGED=""
           PROJECT_UPDATED=false
           if [ -z "$LAST_TAG" ]; then
@@ -148,8 +145,6 @@ jobs:
             echo "version=$VERSION"
             echo "core_tag=$CORE_TAG"
             echo "core_updated=$CORE_UPDATED"
-            echo "asset_name=$ASSET_NAME"
-            echo "asset_url=$ASSET_URL"
             echo "last_tag=$LAST_TAG"
             echo "changed_files<<EOF"
             printf '%s\n' "$CHANGED" | head -20
@@ -166,8 +161,6 @@ jobs:
       VERSION: ${{ needs.check.outputs.version }}
       CORE_TAG: ${{ needs.check.outputs.core_tag }}
       CORE_UPDATED: ${{ needs.check.outputs.core_updated }}
-      ASSET_NAME: ${{ needs.check.outputs.asset_name }}
-      ASSET_URL: ${{ needs.check.outputs.asset_url }}
       LAST_TAG: ${{ needs.check.outputs.last_tag }}
       CHANGED_FILES: ${{ needs.check.outputs.changed_files }}
     steps:
@@ -193,14 +186,68 @@ jobs:
           set -euo pipefail
           sh test_local.sh
 
-      - name: 下载 sing-box 核心 (arm64)
-        # bin/ 被 .gitignore 忽略, checkout 里没有, 每次构建都必须重新下载
+      - name: 安装 Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+
+      - name: 编译 sing-box 核心 (android-arm64)
+        # bin/ 被 .gitignore 忽略, checkout 里没有; 官方 release 的 android-arm64 缺 with_naive_outbound,
+        # 因此从 CORE_TAG 源码按 release/DEFAULT_BUILD_TAGS 交叉编译并打包成 customize.sh 期望的 tar.gz
+        env:
+          NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
+          CC="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang"
+          CXX="${CC}++"
+          [ -x "$CC" ] || { echo "::error::未找到 NDK clang: $CC"; exit 1; }
+
+          SRC_DIR="$RUNNER_TEMP/sing-box"
+          DIST_DIR="$RUNNER_TEMP/sing-box-dist"
+          PKG_DIR="sing-box-${VERSION}-android-arm64"
+          ASSET_NAME="${PKG_DIR}.tar.gz"
+
+          rm -rf "$SRC_DIR" "$DIST_DIR"
+          git clone --depth 1 --branch "$CORE_TAG" "https://github.com/${CORE_REPO}.git" "$SRC_DIR"
+
+          TAGS=$(tr -d '\r\n' < "${SRC_DIR}/release/DEFAULT_BUILD_TAGS")
+          LDFLAGS_SHARED=$(tr -d '\r\n' < "${SRC_DIR}/release/LDFLAGS")
+          [ -n "$TAGS" ] || { echo "::error::release/DEFAULT_BUILD_TAGS 为空"; exit 1; }
+          # Android 上 cronet-go 只提供静态库 libcronet.a (!with_purego + CGO), 不能带 with_purego
+          grep -qE '(^|,)with_naive_outbound(,|$)' <<<"$TAGS" \
+            || { echo "::error::release/DEFAULT_BUILD_TAGS 缺少 with_naive_outbound: ${TAGS}"; exit 1; }
+          echo "编译 tags: $TAGS"
+
+          mkdir -p "${DIST_DIR}/${PKG_DIR}"
+          (
+            cd "$SRC_DIR"
+            # v1.15.0-alpha.13 依赖的旧版 cronet-go 在 #cgo LDFLAGS 里写了 -l:libcronet.a,
+            # Go 默认 CGO 白名单禁止带冒号的 -l:, 需要显式放行 (新版本 cronet-go 已改成路径引用)
+            export CC CXX CGO_ENABLED=1 GOOS=android GOARCH=arm64
+            export CGO_LDFLAGS_ALLOW='-l:libcronet\.a'
+            go build -v -trimpath \
+              -o "${DIST_DIR}/${PKG_DIR}/sing-box" \
+              -tags "$TAGS" \
+              -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+              ./cmd/sing-box
+          )
+          cp "${SRC_DIR}/LICENSE" "${DIST_DIR}/${PKG_DIR}/"
+
+          # 校验二进制确为 aarch64 ELF64
+          ELF=$(od -An -tx1 -N 20 "${DIST_DIR}/${PKG_DIR}/sing-box" | tr -d ' \n')
+          case "$ELF" in
+            7f454c4602*) : ;;
+            *) echo "::error::sing-box 不是 64 位 ELF (magic: ${ELF})"; exit 1 ;;
+          esac
+          if [ "${ELF:36:4}" != "b700" ]; then
+            echo "::error::sing-box 不是 aarch64 (e_machine: ${ELF:36:4}, 期望 b700)"
+            exit 1
+          fi
+
           mkdir -p bin
           rm -f bin/sing-box-*.tar.gz
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
-            -o "bin/${ASSET_NAME}" "$ASSET_URL"
+          tar -czf "bin/${ASSET_NAME}" -C "$DIST_DIR" "$PKG_DIR"
           # 校验确实是含 sing-box 可执行文件的 tar.gz (customize.sh 靠它解压)。
           # 先落盘成变量再 grep: 见文件头第 4 条。
           TAR_LIST=$(tar -tzf "bin/${ASSET_NAME}")
@@ -209,7 +256,7 @@ jobs:
             head -20 <<<"$TAR_LIST" | sed 's/^/  /'
             exit 1
           fi
-          echo "已下载: ${ASSET_NAME} ($(du -h "bin/${ASSET_NAME}" | cut -f1))"
+          echo "已编译打包: ${ASSET_NAME} ($(du -h "bin/${ASSET_NAME}" | cut -f1))"
 
       - name: 计算 versionCode 与 release tag
         id: version
@@ -230,15 +277,15 @@ jobs:
             VERSION_CODE=$COMPUTED
           fi
 
+          # 同一个仓库里 main 书签也在发 release, 它去掉 -reF1nd 后缀后同样会算出 v{version}:
+          # 撞名时幂等分支会去"覆盖对方的 zip 资产", 所以本分支的 tag 一律加 official- 前缀
           if [ "$CORE_UPDATED" = true ]; then
-            # 核心更新: tag 用 v{version}
-            REL_TAG="v${VERSION}"
-            REL_TITLE="v${VERSION}"
+            REL_TAG="official-v${VERSION}"
+            REL_TITLE="v${VERSION} (official)"
             REL_NOTES="sing-box 核心更新至 ${CORE_TAG}"
           else
-            # 纯项目更新: tag 用 v{version}-r{versionCode}, 避免与已有 v{version} 冲突
-            REL_TAG="v${VERSION}-r${VERSION_CODE}"
-            REL_TITLE="v${VERSION} (build ${VERSION_CODE})"
+            REL_TAG="official-v${VERSION}-r${VERSION_CODE}"
+            REL_TITLE="v${VERSION} (official, build ${VERSION_CODE})"
             REL_NOTES="模块脚本/配置更新 (sing-box 核心未变, ${CORE_TAG})"
           fi
           echo "versionCode: ${PREV} → ${VERSION_CODE}; release tag: ${REL_TAG}"
@@ -257,7 +304,7 @@ jobs:
           REL_TAG: ${{ steps.version.outputs.rel_tag }}
         run: |
           set -euo pipefail
-          # updateJson / changelog 的 raw URL 跟随实际分支, 不写死 main (本仓库分支是 ref1nd)
+          # updateJson / changelog 的 raw URL 跟随实际分支, 不写死 main (本分支是 official)
           BRANCH=${GITHUB_REF_NAME:?}
 
           sed -i "s|^version=.*|version=${VERSION}|" module.prop

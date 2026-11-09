@@ -1,21 +1,424 @@
 {
+  "$schema": "https://sing-box.sagernet.org/schema.json",
   "log": {
     "level": "info",
     "timestamp": true
   },
+  "dns": {
+    "servers": [
+      {
+        "type": "https",
+        "tag": "dns-cn",
+        "detour": "direct",
+        "server": "223.5.5.5",
+        "tls": {
+          "server_name": "dns.alidns.com"
+        }
+      },
+      {
+        "type": "https",
+        "tag": "dns-cn-2",
+        "detour": "direct",
+        "server": "223.6.6.6",
+        "tls": {
+          "server_name": "dns.alidns.com"
+        }
+      },
+      {
+        "type": "https",
+        "tag": "dns-remote",
+        "detour": "proxy",
+        "server": "8.8.8.8",
+        "tls": {
+          "server_name": "dns.google"
+        }
+      },
+      {
+        "type": "https",
+        "tag": "dns-remote-2",
+        "detour": "proxy",
+        "server": "1.1.1.1",
+        "tls": {
+          "server_name": "cloudflare-dns.com"
+        }
+      },
+      {
+        "type": "https",
+        "tag": "dns-remote-3",
+        "detour": "proxy",
+        "server": "9.9.9.9",
+        "tls": {
+          "server_name": "dns.quad9.net"
+        }
+      },
+      {
+        "type": "tailscale",
+        "tag": "dns-tailscale",
+        "endpoint": "tailscale",
+        "accept_search_domain": true
+      }
+    ],
+    "rules": [
+      {
+        "domain_suffix": ".ts.net",
+        "server": "dns-tailscale"
+      },
+      {
+        "domain_regex": "^[^.]+$",
+        "action": "evaluate",
+        "server": "dns-tailscale",
+        "tag": "ans-ts-short"
+      },
+      {
+        "match_response": "ans-ts-short",
+        "response_rcode": "NOERROR",
+        "action": "respond"
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "rule_set": "geosite-google-cn",
+            "invert": true
+          },
+          {
+            "type": "logical",
+            "mode": "or",
+            "rules": [
+              {
+                "domain_suffix": ".cn"
+              },
+              {
+                "rule_set": "geosite-cn"
+              }
+            ]
+          }
+        ],
+        "action": "evaluate",
+        "server": "dns-cn",
+        "tag": "ans-cn"
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "rule_set": "geosite-google-cn",
+            "invert": true
+          },
+          {
+            "type": "logical",
+            "mode": "or",
+            "rules": [
+              {
+                "domain_suffix": ".cn"
+              },
+              {
+                "rule_set": "geosite-cn"
+              }
+            ]
+          }
+        ],
+        "action": "evaluate",
+        "server": "dns-cn-2",
+        "tag": "ans-cn-2"
+      },
+      {
+        "match_response": "ans-cn",
+        "response_rcode": "NOERROR",
+        "action": "respond",
+        "race": true
+      },
+      {
+        "match_response": "ans-cn-2",
+        "response_rcode": "NOERROR",
+        "action": "respond",
+        "race": true
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "rule_set": "geosite-google-cn",
+            "invert": true
+          },
+          {
+            "type": "logical",
+            "mode": "or",
+            "rules": [
+              {
+                "domain_suffix": ".cn"
+              },
+              {
+                "rule_set": "geosite-cn"
+              }
+            ]
+          }
+        ],
+        "invert": true,
+        "action": "evaluate",
+        "server": "dns-remote",
+        "tag": "ans-fg"
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "rule_set": "geosite-google-cn",
+            "invert": true
+          },
+          {
+            "type": "logical",
+            "mode": "or",
+            "rules": [
+              {
+                "domain_suffix": ".cn"
+              },
+              {
+                "rule_set": "geosite-cn"
+              }
+            ]
+          }
+        ],
+        "invert": true,
+        "action": "evaluate",
+        "server": "dns-remote-2",
+        "tag": "ans-fg-2"
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "rule_set": "geosite-google-cn",
+            "invert": true
+          },
+          {
+            "type": "logical",
+            "mode": "or",
+            "rules": [
+              {
+                "domain_suffix": ".cn"
+              },
+              {
+                "rule_set": "geosite-cn"
+              }
+            ]
+          }
+        ],
+        "invert": true,
+        "action": "evaluate",
+        "server": "dns-remote-3",
+        "tag": "ans-fg-3"
+      },
+      {
+        "match_response": "ans-fg",
+        "response_rcode": "NOERROR",
+        "action": "respond",
+        "race": true
+      },
+      {
+        "match_response": "ans-fg-2",
+        "response_rcode": "NOERROR",
+        "action": "respond",
+        "race": true
+      },
+      {
+        "match_response": "ans-fg-3",
+        "response_rcode": "NOERROR",
+        "action": "respond",
+        "race": true
+      }
+    ],
+    "reverse_mapping": true,
+    "strategy": "ipv4_only"
+  },
+  "certificate": {
+    "store": "mozilla"
+  },
+  "http_clients": [
+    {
+      "tag": "rule-set-downloader",
+      "detour": "proxy"
+    }
+  ],
+  "endpoints": [
+    {
+      "type": "tailscale",
+      "tag": "tailscale",
+      "state_directory": "tailscale",
+      "accept_routes": true
+    }
+  ],
   "inbounds": [
     {
-      "type": "ebpf",
-      "tag": "ebpf-in",
-      "local": {
-        "enabled": true
-      }
+      "type": "tun",
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true,
+      "auto_redirect": true,
+      "strict_route": true
     }
   ],
   "outbounds": [
     {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": [
+        "节点1"
+      ],
+      "default": "节点1"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "节点1",
+      "server": "SERVER_ADDRESS",
+      "server_port": 443,
+      "method": "aes-128-gcm",
+      "password": "PASSWORD"
+    },
+    {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct",
+      "domain_resolver": "dns-cn"
     }
-  ]
+  ],
+  "route": {
+    "rules": [
+      {
+        "port": 53,
+        "action": "hijack-dns"
+      },
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {
+            "ip_version": 6
+          },
+          {
+            "type": "logical",
+            "mode": "or",
+            "rules": [
+              {
+                "ip_is_private": true
+              }
+            ],
+            "invert": true
+          }
+        ],
+        "action": "reject"
+      },
+      {
+        "action": "sniff",
+        "timeout": "300ms"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "rule_set": "geosite-ads",
+        "action": "reject"
+      },
+      {
+        "inbound": "tailscale",
+        "outbound": "direct"
+      },
+      {
+        "ip_cidr": [
+          "100.64.0.0/10",
+          "fd7a:115c:a1e0::/48"
+        ],
+        "outbound": "tailscale"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "rule_set": "geosite-google-cn",
+        "outbound": "proxy"
+      },
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          {
+            "domain_suffix": ".cn"
+          },
+          {
+            "rule_set": "geosite-cn"
+          }
+        ],
+        "action": "resolve",
+        "server": "dns-cn"
+      },
+      {
+        "rule_set": "geoip-cn",
+        "outbound": "direct"
+      },
+      {
+        "outbound": "proxy"
+      }
+    ],
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "geosite-cn",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+        "http_client": "rule-set-downloader",
+        "update_interval": "168h0m0s"
+      },
+      {
+        "type": "remote",
+        "tag": "geosite-ads",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
+        "http_client": "rule-set-downloader",
+        "update_interval": "168h0m0s"
+      },
+      {
+        "type": "remote",
+        "tag": "geosite-google-cn",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google@cn.srs",
+        "http_client": "rule-set-downloader",
+        "update_interval": "168h0m0s"
+      },
+      {
+        "type": "remote",
+        "tag": "geoip-cn",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+        "http_client": "rule-set-downloader",
+        "update_interval": "168h0m0s"
+      }
+    ],
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-cn"
+  },
+  "services": [
+    {
+      "type": "api",
+      "listen_port": 1235,
+      "access_control_allow_origin": [
+        "https://sing-box-dashboard.sagernet.org",
+        "https://dash.sing-box.app"
+      ],
+      "access_control_allow_private_network": true,
+      "dashboard": true
+    }
+  ],
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "cache.db",
+      "store_dns": true,
+      "flush_interval": "10m0s"
+    }
+  }
 }
+

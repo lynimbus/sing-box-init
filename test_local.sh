@@ -130,7 +130,7 @@ grep -q "core stub-1.0.0" "$T/module/module.prop" && ok "描述含核心版本" 
 
 say "配置热重载 (改 conf.d/*.json)"
 OLD=$SPID
-printf '{\n  "inbounds": [ { "type": "ebpf", "tag": "ebpf-in", "mode": "local" } ],\n  "outbounds": [ { "type": "direct", "tag": "direct" } ]\n}\n' >"$T/data/conf.d/config.json"
+printf '{\n  "inbounds": [ { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080 } ],\n  "outbounds": [ { "type": "direct", "tag": "direct" } ]\n}\n' >"$T/data/conf.d/config.json"
 wait_pid_change "$OLD" || fail "配置变化后未重启"
 NEW=$(core_pid)
 ok "配置变化触发重启 ($OLD → $NEW)"
@@ -160,7 +160,7 @@ ok "日志记录了配置恢复"
 grep -q "配置错误" "$T/module/module.prop" && fail "描述仍标着配置错误" || ok "描述已清掉配置错误标记"
 
 say "换一份合法配置: 重新正常重载"
-printf '{\n  "inbounds": [ { "type": "ebpf", "tag": "ebpf-in", "mode": "hybrid" } ],\n  "outbounds": [ { "type": "direct", "tag": "direct" } ]\n}\n' >"$T/data/conf.d/config.json"
+printf '{\n  "inbounds": [ { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080 } ],\n  "outbounds": [ { "type": "direct", "tag": "direct" } ]\n}\n' >"$T/data/conf.d/config.json"
 wait_pid_change "$OLD" || fail "合法配置变化后未重载"
 ok "恢复重载能力 ($OLD → $(core_pid))"
 
