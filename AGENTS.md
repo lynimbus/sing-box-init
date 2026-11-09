@@ -2,7 +2,9 @@
 
 KernelSU(兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运行（开机自启、崩溃自动重启、**模块启用/禁用开关 = sing-box 开关**、Action 按钮只重启、状态显示在模块描述、WebUI 入口）。
 
-核心价值：本模块跑的是 **reF1nd 分支的 sing-box**（带 `ebpf` 入站），能劫持**热点（网络共享）中其他设备的流量**——这是 SFA 等非 root 方案做不到的，也是这个模块存在的理由。
+核心价值：root 下常驻一个透明代理内核，能劫持**热点（网络共享）中其他设备的流量**——这是 SFA 等非 root 方案做不到的，也是这个模块存在的理由。
+
+> **本文件在 `official` 书签上的差异**：这个书签跟的是**官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)**（**没有 `ebpf` 入站**），热点劫持改由 **`tun` + `auto_redirect`** 负责（上游文档：Android root 下受支持，含热点/中继的转发流量）。Go 守护进程、脚本、看门狗与 `main` 书签完全一致（内核无关）。release tag 带 `official-` 前缀，`updateJson` / changelog 指向 `official` 分支。下文凡提 `ebpf` / `shared` 平面 / `sb_share_in` 的地方都是 `main` 书签（reF1nd 核心）的历史与约束，本分支不适用，对应做法见第 14 条。
 
 ## 架构（Go 单二进制 + 薄 sh 包装）
 
@@ -58,10 +60,11 @@ KernelSU(兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运�
 12. 用户可见输出用中文。代码走"自解释命名"路线：注释只写**为什么**与非显然约束（例：为什么 stop 先停看门狗、为什么 module.prop 不能 rename），不复述代码在做什么。
 13. **配置完全由用户维护，守护进程不改写配置**。白名单/热点分流/路由规则都写在 `conf.d/*.json` 里；曾经有过"纯文本 include_package + 生成目录 + JSON 注入"整套机制，已删除，不要再引入。
     - sing-box 只读配置目录里的 `*.json`（其余后缀忽略，见 `cmd/sing-box/cmd_run.go` 的 `readConfig`），所以备份文件放在 `conf.d/` 里只要不叫 `.json` 就不会被解析；不过备份还是建议放到 `$DATA_DIR` 下。
-14. 热点劫持（本模块的存在理由）在 1.14 之后由 ebpf 入站的 **`shared` 平面**负责：`shared.enabled: true` + `shared.interface: [...]`（**必填**；列上暂时不存在的接口是安全的，成为默认上游时会自动暂停）。**实测（Xiaomi 14 / HyperOS）**：热点接口是 `wlan2`（`wlan0` 是普通 Wi-Fi 站接口，不要列），USB 共享是 `rndis0`；验证方式是看 `tc filter show dev <iface> ingress` 里有没有 `sb_share_in`（挂的是 ingress，不是 egress）。旧版靠 `local.include_uid: [0]` 蹭内核转发流量（uid 0）的做法已不需要。
-    - ⚠️ **ebpf 入站 schema 随版本变**：1.15 已**去掉 `mode` 字段**（旧配置会直接报 `unknown field "mode"`，真机实测），写配置前先看该 tag 下的 `docs/configuration/inbound/ebpf.zh.md` 与 `option/ebpf.go`，不要凭记忆或旧配置抄。
-    - ⚠️ `shared` 块存在就要求 shared 被启用：写 `"shared": {"enabled": false, ...}` 会被核心拒绝（`shared options require shared interception`，真机实测）；不启用就整块删掉。同理 `local` 与 `shared` 只要任一侧写了 `enabled`，另一侧省略 `enabled` 就视为 `false`。
-    - 不要用 `route.rules[].package_name` 替代 `local.include_package`：它依赖进程可见性，部分构建下不生效（SFA 有实例），而 inbound 的 include/exclude 一直正常。
+14. 热点劫持（本模块的存在理由）在本分支由 **`tun` 入站的 `auto_redirect`** 负责：`auto_route: true` + `auto_redirect: true`，外加 `route.auto_detect_interface: true`。上游文档写明 `auto_redirect` 在 Android root 下受支持、**含热点/中继的转发流量**；它依赖 `auto_route`（单独写不生效），并且和 `route.default_mark` 冲突。`auto_detect_interface` 不能省：出站回落再次撞进 tun 就是回环。
+    - ⚠️ 官方核心**没有 `ebpf` 入站**（`main` 书签的 reF1nd 核心才有）。`"type": "ebpf"` 在这边 `sing-box check` 直接失败，别从 `main` 抄配置。
+    - 分应用过滤写在 tun 入站的 `include_package` / `exclude_package` / `include_uid` / `exclude_uid`，不要用 `route.rules[].package_name`（依赖进程可见性，部分构建下不生效）。
+    - 排障：`ip link show` 看 tun 设备、`nft list ruleset | grep -i sing` 看重定向规则、`ip route show table 2022` 看 auto_route 有没有铺上。
+    - （`main` 书签仍是 ebpf 的 `local` / `shared` 平面，热点接口 Xiaomi 14 / HyperOS 实测是 `wlan2`、USB 共享是 `rndis0`，验证看 `tc filter show dev <iface> ingress` 里的 `sb_share_in`。本分支的 tun 方案不需要接口名。）
 15. **`stop` 必须先停看门狗、再停内核**。顺序反了就会出现：`stop` 杀掉内核 → 看门狗在中间又拉起一个新内核 → 没人再管它（真机现象："关了模块开关，内核还在跑"）。
 16. **看门狗被 `kill -9` 时内核会孤儿化**（这是已知边界：SIGKILL 无法捕获，KernelSU 也没有 init 兜底）。收敛方式：点 Action / 跑 `start`（新看门狗启动时会清理孤儿）或重启设备。panic 才会走自愈路径。
 17. 别把 CI 的 tar 校验写成 `tar -tzf x | grep -q ...`：`grep -q` 命中即退出，tar 收到 EPIPE 退出码非 0，`pipefail` 把整条管道判为失败 → 假阴性。曾因此让自动更新静默死掉 10 天。
@@ -94,12 +97,13 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin
 
 ## 核心更新（GitHub Actions 自动构建发布）
 
-- `update.json` — KernelSU Manager 模块更新元数据，`module.prop` 的 `updateJson` 指向它在 GitHub 上的 raw URL。⚠️ 分支是 `ref1nd`，raw URL 必须用 `ref1nd`（工作流用 `GITHUB_REF_NAME` 动态取分支）。
+- `update.json` — KernelSU Manager 模块更新元数据，`module.prop` 的 `updateJson` 指向它在 GitHub 上的 raw URL。⚠️ 本分支是 `official`，raw URL 必须用 `official`（工作流用 `GITHUB_REF_NAME` 动态取分支）。指错分支，装官方核心的手机就会被推 reF1nd 核心的包。
 - `.github/workflows/update.yml` — **每天一次** + 手动触发（`force` 强制构建）；`check` 判断要不要构建 → `build` 装 Go → `go vet` + `go test` + `sh test_local.sh` → 下载 arm64 核心 → 改 `module.prop`/`update.json`/`changelog.md` → `build.sh` 打包 → 校验产物（zip 内容齐全 + 二进制必须是 aarch64 ELF）→ push → release；**失败会自动开/更新一个 issue，下次成功自动关闭**（曾经静默变红、链路死了 10 天没人发现）。触发条件：① 核心有新版本；② 项目文件有变化（compare API，排除 `.github/`、`module.prop`、`update.json`、`changelog.md`、README/LICENSE/.gitignore）。
-- **核心永远取最新 prerelease**（本模块要的是 reF1nd 分支的新 eBPF 特性，正式版对这里没有意义）。
+- **核心取最新 prerelease**：官方预发布就是上游 master，和本分支原先的 `1.15.0-alpha` 节奏一致；只想跟正式版就删掉 `select(.prerelease)`（正式版落后一个小版本，`versionCode` 单调递增逻辑会处理这种回退）。
+- **本分支 release tag 带 `official-` 前缀**：`main` 书签的 tag 去掉 `-reF1nd` 后也算出同名 `v{version}`，撞名时幂等分支会覆盖掉对方的 zip 资产。`LAST_TAG` 同样按前缀过滤，否则跨书签 compare 天天判定"有变更"。
 - ⚠️ 改工作流必看：**先 push 再打 tag**；release 步骤幂等（tag 已存在则覆盖资产）；GitHub API 一律走 `gh api`（匿名 curl 每 IP 每小时 60 次，被限流后旧逻辑会把 `version` 写成 `null`）；不要用 `tar | grep -q` 做校验（见坑 17）。
 - `versionCode` 规则：`max(major * 10000 + minor * 100 + 最后数字, 上一次 versionCode + 1)`。
-- **纯项目更新（核心未变）**：`version` 保持核心版本不变，只 `versionCode + 1`；release tag 用 `v{version}-r{versionCode}`。
+- **纯项目更新（核心未变）**：`version` 保持核心版本不变，只 `versionCode + 1`；本分支 release tag 用 `official-v{version}-r{versionCode}`。
 
 ## 版本历史里值得知道的事
 

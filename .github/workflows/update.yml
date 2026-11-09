@@ -13,8 +13,11 @@ name: Update sing-box Core
 #   5. 顺序是 构建 → 提交推送 → 发 release: 先推再打 tag, tag 才能指向包含新版本号的提交。
 #      构建失败就不会有孤立 tag/release; push 失败直接失败退出, 不发 release (下次重跑仍是同一 versionCode)。
 #   6. release 步骤幂等: tag 已存在 (上次跑到一半) 时改为覆盖上传资产, 不会因 "already exists" 失败。
-#   7. 核心取版优先 prerelease: 本模块依赖 reF1nd 分支的 eBPF 实现 (热点流量劫持), 新特性只在预发布里。
+#   7. 核心取版优先 prerelease: 预发布即上游 master, 与 main 书签原来的 1.15.0-alpha 跟踪节奏一致;
+#      只想跟正式版就把下面的 select(.prerelease) 删掉 (最新正式版会落后一个小版本)。
 #   8. 构建入口只有 build.sh 一个 (本地与 CI 共用), 不在 workflow 里重写一套编译逻辑。
+#   9. 本分支核心是官方 SagerNet/sing-box, 没有 ebpf 入站: 热点劫持改由 tun 的 auto_redirect 承担
+#      (上游文档明确写了 Android root 下支持, 含热点/中继的转发流量), 别抄 main 书签的 ebpf 配置。
 
 on:
   schedule:
@@ -40,8 +43,8 @@ defaults:
     shell: bash
 
 env:
-  # sing-box 核心来源 (reF1nd 分支: 带 eBPF 入站的那份)
-  CORE_REPO: reF1nd/sing-box-releases
+  # sing-box 核心来源 (官方上游; main 书签用 reF1nd 分支那份, 带 ebpf 入站)
+  CORE_REPO: SagerNet/sing-box
 
 jobs:
   check:
@@ -56,6 +59,7 @@ jobs:
       asset_name: ${{ steps.check.outputs.asset_name }}
       asset_url: ${{ steps.check.outputs.asset_url }}
       last_tag: ${{ steps.check.outputs.last_tag }}
+      changed_files: ${{ steps.check.outputs.changed_files }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -82,7 +86,7 @@ jobs:
 
           CORE_TAG=$(jq -r '.tag_name // empty' <<<"$RELEASE_JSON")
           [ -n "$CORE_TAG" ] || { echo "::error::release 缺少 tag_name"; exit 1; }
-          VERSION=$(sed 's/^v//; s/-reF1nd$//' <<<"$CORE_TAG")
+          VERSION=${CORE_TAG#v}
           # 版本号必须形如 1.14.0 / 1.14.0-rc.4, 否则后面 versionCode 与 zip 名都会算错
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]]; then
             echo "::error::解析出的版本号不合法: '${VERSION}' (tag: ${CORE_TAG})"
@@ -113,7 +117,11 @@ jobs:
 
           # ---- 项目文件是否有更新 (自上次 release 以来) ----
           # 排除工作流自身维护的文件, 否则工作流自己的提交会再次触发构建, 每天空转发版。
-          LAST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=1" --jq '.[0].tag_name // empty' || true)
+          # 只认本分支的 release (tag 前缀 official-): 否则会拿 main 书签的 release 去 compare,\
+          # 两个书签的提交树永远不同 → 天天判定"有变更" → 空转发版
+          LAST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '[.[]|.tag_name|select(startswith("official-"))][0]// empty' \
+            || true)
           CHANGED=""
           PROJECT_UPDATED=false
           if [ -z "$LAST_TAG" ]; then
@@ -230,15 +238,15 @@ jobs:
             VERSION_CODE=$COMPUTED
           fi
 
+          # 同一个仓库里 main 书签也在发 release, 它去掉 -reF1nd 后缀后同样会算出 v{version}:
+          # 撞名时幂等分支会去"覆盖对方的 zip 资产", 所以本分支的 tag 一律加 official- 前缀
           if [ "$CORE_UPDATED" = true ]; then
-            # 核心更新: tag 用 v{version}
-            REL_TAG="v${VERSION}"
-            REL_TITLE="v${VERSION}"
+            REL_TAG="official-v${VERSION}"
+            REL_TITLE="v${VERSION} (official)"
             REL_NOTES="sing-box 核心更新至 ${CORE_TAG}"
           else
-            # 纯项目更新: tag 用 v{version}-r{versionCode}, 避免与已有 v{version} 冲突
-            REL_TAG="v${VERSION}-r${VERSION_CODE}"
-            REL_TITLE="v${VERSION} (build ${VERSION_CODE})"
+            REL_TAG="official-v${VERSION}-r${VERSION_CODE}"
+            REL_TITLE="v${VERSION} (official, build ${VERSION_CODE})"
             REL_NOTES="模块脚本/配置更新 (sing-box 核心未变, ${CORE_TAG})"
           fi
           echo "versionCode: ${PREV} → ${VERSION_CODE}; release tag: ${REL_TAG}"
@@ -257,7 +265,7 @@ jobs:
           REL_TAG: ${{ steps.version.outputs.rel_tag }}
         run: |
           set -euo pipefail
-          # updateJson / changelog 的 raw URL 跟随实际分支, 不写死 main (本仓库分支是 ref1nd)
+          # updateJson / changelog 的 raw URL 跟随实际分支, 不写死 main (本分支是 official)
           BRANCH=${GITHUB_REF_NAME:?}
 
           sed -i "s|^version=.*|version=${VERSION}|" module.prop

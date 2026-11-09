@@ -1,8 +1,10 @@
 # sing-box init
 
-KernelSU / Magisk 模块：把 [reF1nd 分支的 sing-box](https://github.com/reF1nd/sing-box-releases)（带 `ebpf` 入站）当作常驻服务跑起来。
+KernelSU / Magisk 模块：把[官方 sing-box](https://github.com/SagerNet/sing-box)（上游 SagerNet）当作常驻服务跑起来。
 
-**它解决什么**：root 级 eBPF 透明代理常驻运行——开机自启、崩溃自动重启、模块开关就是 sing-box 开关；并且能**劫持热点（网络共享）中其他设备的流量**，这是 SFA 之类非 root 方案做不到的。
+**它解决什么**：root 级透明代理常驻运行——开机自启、崩溃自动重启、模块开关就是 sing-box 开关；`tun` 入站的 `auto_redirect` 能**劫持热点（网络共享）中其他设备的流量**，这是 SFA 之类非 root 方案做不到的。
+
+> 本仓库两个书签：`main` 跟 [reF1nd 分支核心](https://github.com/reF1nd/sing-box-releases)（带 `ebpf` 入站），`official`（本分支）跟官方核心、用 `tun` + `auto_redirect`。两边安装包不通用，各自的 `updateJson` 指向自己的分支。
 
 ## 安装
 
@@ -12,28 +14,28 @@ KernelSU / Magisk 模块：把 [reF1nd 分支的 sing-box](https://github.com/re
 
 配置放在 **`/data/adb/sing-box/conf.d/`**，目录下所有 `*.json` 会被合并（数组追加、对象递归合并——**不要在两个文件里定义同 tag 的 inbound/outbound**；目录里非 `.json` 后缀的文件会被忽略）。首次安装会生成一份默认示例配置。
 
-守护进程**不改写你的配置**：接管范围完全由你写在配置里。默认示例只开本机流量，这样一段：
+守护进程**不改写你的配置**：接管范围完全由你写在配置里。默认示例就是这一段（tun 接管全机 + 热点，出站全直连）：
 
 ```json
 "inbounds": [
   {
-    "type": "ebpf",
-    "tag": "ebpf-in",
-    "local": { "enabled": true },
-    "shared": { "enabled": true, "interface": ["wlan2", "rndis0"] }
+    "type": "tun",
+    "tag": "tun-in",
+    "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+    "mtu": 9000,
+    "auto_route": true,
+    "auto_redirect": true
   }
-]
+],
+"route": { "auto_detect_interface": true }
 ```
 
-（上面同时列了 `shared` 的写法；默认示例里没有 `shared`，没写就是只接管本机。）
+- **`auto_route` + `auto_redirect`** — 前者把默认路由指到 tun，后者用 nftables 把流量重定向进来。两个一起才能接管**本机**流量和**共享出去的下游**流量（Wi-Fi 热点、USB 共享、中继）；上游文档写明 `auto_redirect` 在 Android root 下受支持、含转发流量。`auto_redirect` 依赖 `auto_route`，单独写不生效。
+- **`route.auto_detect_interface: true`** — 别省。否则出站回落时会再次撞进 tun，形成回环。
+- 分应用过滤写在 tun 入站的 **`include_package` / `exclude_package` / `include_uid` / `exclude_uid`**（不写就是全部本机流量）。别用 `route.rules[].package_name` 做这件事，它依赖进程可见性、部分构建下不生效。
 
-- **`local`** — 接管**本机**流量，可用 `include_package` / `exclude_package` / `include_uid` / `exclude_uid` 等做过滤（不写过滤器就是全部本机流量）。
-- **`shared`** — 接管**共享出去的下游**流量（Wi-Fi 热点、USB 共享）。`interface` 是必填的下游接口名，**因机型而异**：实测 Xiaomi 14 / HyperOS 热点是 `wlan2`，其他常见 `ap0` / `softap0`；⚠️ `wlan0` 一般是普通 Wi-Fi 站接口，不要列。USB 共享是 `rndis0`。不确定的话开热点后跑 `su -c 'tc filter show dev <接口名> ingress'`，被接管的接口里会出现 `sb_share_in`。列出暂时不存在的接口是安全的，sing-box 会等到它出现；接口成为当前上网出口时会被自动暂停接管。
-  ⚠️ **不启用就整块别写**：`"shared": {"enabled": false}` 会被拒绝（`shared options require shared interception`，真机实测）。
-- `dns_mode` 默认为 `respect_policy`：先按 uid/包名/来源过滤，再接管目标端口 53。
-- `bypass_private_address` 默认 `true`：目标是私有/保留地址（局域网）时不接管。
-
-> ⚠️ 1.14 之后 `ebpf` 入站**不再有 `mode` 字段**（旧的 `mode: local|hybrid` 会被拒绝：`unknown field "mode"`），热点改由 `shared` 平面负责。跨版本抄配置前先对照 `docs/configuration/inbound/ebpf.zh.md`。
+> ⚠️ 官方核心**没有 `ebpf` 入站**（那是 reF1nd 分支的特性，`main` 书签在用）。从 `main` 抄来的 `"type": "ebpf"` 在这边会让 `sing-box check` 直接失败。
+> 排障：`su -c 'ip link show'` 看 tun 设备、`su -c 'nft list ruleset | grep -i sing'` 看重定向规则、`su -c 'ip route show table 2022'` 看 auto_route 是否铺上。
 
 改完配置**不用手动重启**：守护进程检测到 `conf.d/` 变化（去抖 0.8 秒）会先跑 `sing-box check` 校验，通过才重启内核；**配置写错不会打断你正在用的网络**，旧内核继续跑，错误会显示在模块描述里。
 
