@@ -5,3 +5,8 @@
 * Fixes and improvements
 
 > 发布页: https://github.com/SagerNet/sing-box/releases/tag/v1.15.0-alpha.13
+
+## 模块变更
+
+- AGENTS.md
+- config/config.json
