@@ -60,7 +60,7 @@ KernelSU(兼容 Magisk) 模块：让 sing-box 像 systemd 服务一样持久运�
 12. 用户可见输出用中文。代码走"自解释命名"路线：注释只写**为什么**与非显然约束（例：为什么 stop 先停看门狗、为什么 module.prop 不能 rename），不复述代码在做什么。
 13. **配置完全由用户维护，守护进程不改写配置**。白名单/热点分流/路由规则都写在 `conf.d/*.json` 里；曾经有过"纯文本 include_package + 生成目录 + JSON 注入"整套机制，已删除，不要再引入。
     - sing-box 只读配置目录里的 `*.json`（其余后缀忽略，见 `cmd/sing-box/cmd_run.go` 的 `readConfig`），所以备份文件放在 `conf.d/` 里只要不叫 `.json` 就不会被解析；不过备份还是建议放到 `$DATA_DIR` 下。
-14. 热点劫持（本模块的存在理由）在本分支由 **`tun` 入站的 `auto_redirect`** 负责：`auto_route: true` + `auto_redirect: true`，外加 `route.auto_detect_interface: true`。上游文档写明 `auto_redirect` 在 Android root 下受支持、**含热点/中继的转发流量**；它依赖 `auto_route`（单独写不生效），并且和 `route.default_mark` 冲突。`auto_detect_interface` 不能省：出站回落再次撞进 tun 就是回环。
+14. 热点劫持（本模块的存在理由）在本分支由 **`tun` 入站的 `auto_redirect`** 负责：`auto_route: true` + `auto_redirect: true`，外加 `route.auto_detect_interface: true`。上游文档写明 `auto_redirect` 在 Android root 下受支持、**含热点/中继的转发流量**；它依赖 `auto_route`（单独写不生效），并且和 `route.default_mark` 冲突。`auto_detect_interface` 不能省：出站回落再次撞进 tun 就是回环。默认配置还显式写了 `dns_mode: "disabled"`：`auto_route` 下它默认是 `hijack`，没配 `dns.servers` 时会把 DNS 抢进核心却没处问，真机表现是"装完没网"。
     - ⚠️ 官方核心**没有 `ebpf` 入站**（`main` 书签的 reF1nd 核心才有）。`"type": "ebpf"` 在这边 `sing-box check` 直接失败，别从 `main` 抄配置。
     - 分应用过滤写在 tun 入站的 `include_package` / `exclude_package` / `include_uid` / `exclude_uid`，不要用 `route.rules[].package_name`（依赖进程可见性，部分构建下不生效）。
     - 排障：`ip link show` 看 tun 设备、`nft list ruleset | grep -i sing` 看重定向规则、`ip route show table 2022` 看 auto_route 有没有铺上。

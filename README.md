@@ -24,7 +24,8 @@ KernelSU / Magisk 模块：把[官方 sing-box](https://github.com/SagerNet/sing
     "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
     "mtu": 9000,
     "auto_route": true,
-    "auto_redirect": true
+    "auto_redirect": true,
+    "dns_mode": "disabled"
   }
 ],
 "route": { "auto_detect_interface": true }
@@ -32,6 +33,7 @@ KernelSU / Magisk 模块：把[官方 sing-box](https://github.com/SagerNet/sing
 
 - **`auto_route` + `auto_redirect`** — 前者把默认路由指到 tun，后者用 nftables 把流量重定向进来。两个一起才能接管**本机**流量和**共享出去的下游**流量（Wi-Fi 热点、USB 共享、中继）；上游文档写明 `auto_redirect` 在 Android root 下受支持、含转发流量。`auto_redirect` 依赖 `auto_route`，单独写不生效。
 - **`route.auto_detect_interface: true`** — 别省。否则出站回落时会再次撞进 tun，形成回环。
+- **`dns_mode: "disabled"`** — 开 `auto_route` 时它默认就是 `hijack`（抢下 53 端口交给核心自己的 DNS）。这个模板的出站只有 `direct`，抢 DNS 没有收益；而没配 `dns.servers`、系统 DNS 又指向 tun 时会绕成环，表现就是"装完没网"。要接管 DNS 就自己补 `dns` 块，再把这一行删掉。
 - 分应用过滤写在 tun 入站的 **`include_package` / `exclude_package` / `include_uid` / `exclude_uid`**（不写就是全部本机流量）。别用 `route.rules[].package_name` 做这件事，它依赖进程可见性、部分构建下不生效。
 
 > ⚠️ 官方核心**没有 `ebpf` 入站**（那是 reF1nd 分支的特性，`main` 书签在用）。从 `main` 抄来的 `"type": "ebpf"` 在这边会让 `sing-box check` 直接失败。
